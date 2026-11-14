@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <vector>
 
 struct Vec3 {
@@ -179,6 +180,58 @@ static Mesh makePlane(float half = 50.0f) {
     return m;
 }
 
+
+// Kubus 1x1x1 berpusat di origin (bentuk "kotak")
+static Mesh makeCube() {
+    std::vector<float> v;
+    std::vector<unsigned> idx;
+    const float n[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    for (int f = 0; f < 6; f++) {
+        Vec3 N(n[f][0], n[f][1], n[f][2]);
+        Vec3 up = std::fabs(N.y) > 0.5f ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
+        Vec3 a = normalize(cross(N, up)), b = cross(N, a);
+        Vec3 c[4] = {N * 0.5f - a * 0.5f - b * 0.5f, N * 0.5f + a * 0.5f - b * 0.5f,
+                     N * 0.5f + a * 0.5f + b * 0.5f, N * 0.5f - a * 0.5f + b * 0.5f};
+        unsigned base = (unsigned)(v.size() / 6);
+        for (auto& p : c) v.insert(v.end(), {p.x, p.y, p.z, N.x, N.y, N.z});
+        idx.insert(idx.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+    }
+    Mesh m;
+    m.upload(v, idx);
+    return m;
+}
+
+// Silinder diameter 1, tinggi 1 berpusat di origin (bentuk "lingkaran")
+static Mesh makeCylinder(int seg = 32) {
+    std::vector<float> v;
+    std::vector<unsigned> idx;
+    const float PI = 3.14159265358979f;
+    for (int i = 0; i <= seg; i++) { // sisi
+        float t = 2.0f * PI * i / seg, x = std::cos(t), z = std::sin(t);
+        v.insert(v.end(), {0.5f * x, -0.5f, 0.5f * z, x, 0, z, 0.5f * x, 0.5f, 0.5f * z, x, 0, z});
+    }
+    for (int i = 0; i < seg; i++) {
+        unsigned a = i * 2;
+        idx.insert(idx.end(), {a, a + 2, a + 1, a + 1, a + 2, a + 3});
+    }
+    for (int cap = 0; cap < 2; cap++) { // tutup atas & bawah
+        float y = cap ? 0.5f : -0.5f, ny = cap ? 1.0f : -1.0f;
+        unsigned c = (unsigned)(v.size() / 6);
+        v.insert(v.end(), {0, y, 0, 0, ny, 0});
+        for (int i = 0; i <= seg; i++) {
+            float t = 2.0f * PI * i / seg;
+            v.insert(v.end(), {0.5f * std::cos(t), y, 0.5f * std::sin(t), 0, ny, 0});
+        }
+        for (int i = 0; i < seg; i++) {
+            if (cap) idx.insert(idx.end(), {c, c + 1 + i + 1, c + 1 + i});
+            else     idx.insert(idx.end(), {c, c + 1 + i, c + 1 + i + 1});
+        }
+    }
+    Mesh m;
+    m.upload(v, idx);
+    return m;
+}
+
 static const char* VERT_SRC = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -278,6 +331,64 @@ static Camera g_camera;
 static bool g_firstMouse = true;
 static double g_lastX = 0, g_lastY = 0;
 
+
+// ---------- Sistem blok ----------
+struct Block { int shape; int x, y, z; Vec3 color; }; // shape 0 = kotak, 1 = lingkaran
+static std::vector<Block> g_blocks;
+static int g_shape = 0, g_colorIdx = 0;
+static bool g_clickPlace = false, g_clickRemove = false;
+static const Vec3 PALETTE[] = {{0.85f, 0.85f, 0.85f}, {0.9f, 0.25f, 0.2f}, {0.2f, 0.6f, 0.95f},
+                               {0.3f, 0.85f, 0.4f}, {0.95f, 0.8f, 0.2f}, {0.6f, 0.4f, 0.25f}};
+static const int PALETTE_N = 6;
+
+static int findBlock(int x, int y, int z) {
+    for (size_t i = 0; i < g_blocks.size(); i++)
+        if (g_blocks[i].x == x && g_blocks[i].y == y && g_blocks[i].z == z) return (int)i;
+    return -1;
+}
+
+struct Target { bool canPlace = false; int px = 0, py = 0, pz = 0; int hitBlock = -1; };
+
+// Tembak sinar dari tengah layar: cari blok yang kena / sel kosong di depannya
+static Target raycast() {
+    Target t;
+    Vec3 o = g_camera.position, d = g_camera.front();
+    int lx = 0, ly = 0, lz = 0;
+    bool havePrev = false;
+    for (float s = 0; s < 20.0f; s += 0.02f) {
+        Vec3 p = o + d * s;
+        if (p.y < 0) break; // kena lantai
+        int cx = (int)std::floor(p.x), cy = (int)std::floor(p.y), cz = (int)std::floor(p.z);
+        if (havePrev && cx == lx && cy == ly && cz == lz) continue;
+        int b = findBlock(cx, cy, cz);
+        if (b >= 0) { t.hitBlock = b; break; }
+        lx = cx; ly = cy; lz = cz; havePrev = true;
+    }
+    if (havePrev) { t.canPlace = true; t.px = lx; t.py = ly; t.pz = lz; }
+    return t;
+}
+
+static void updateTitle(GLFWwindow* w) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "Station Design | Bentuk: %s | Blok: %d",
+                  g_shape == 0 ? "Kotak" : "Lingkaran", (int)g_blocks.size());
+    glfwSetWindowTitle(w, buf);
+}
+
+static void mouseButtonCallback(GLFWwindow*, int button, int action, int) {
+    if (action != GLFW_PRESS) return;
+    if (button == GLFW_MOUSE_BUTTON_LEFT) g_clickPlace = true;
+    if (button == GLFW_MOUSE_BUTTON_RIGHT) g_clickRemove = true;
+}
+
+static void keyCallback(GLFWwindow* w, int key, int, int action, int) {
+    if (action != GLFW_PRESS) return;
+    if (key == GLFW_KEY_1) g_shape = 0;
+    if (key == GLFW_KEY_2) g_shape = 1;
+    if (key == GLFW_KEY_C) g_colorIdx = (g_colorIdx + 1) % PALETTE_N;
+    updateTitle(w);
+}
+
 static void mouseCallback(GLFWwindow*, double x, double y) {
     if (g_firstMouse) { g_lastX = x; g_lastY = y; g_firstMouse = false; }
     g_camera.look((float)(x - g_lastX), (float)(y - g_lastY));
@@ -317,7 +428,7 @@ int main() {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_SAMPLES, 4);
 
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "Mini 3D Engine", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "Station Design", nullptr, nullptr);
     if (!window) {
         std::fprintf(stderr, "Gagal membuat window\n");
         glfwTerminate();
@@ -328,6 +439,8 @@ int main() {
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     glfwSetCursorPosCallback(window, mouseCallback);
     glfwSetScrollCallback(window, scrollCallback);
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetKeyCallback(window, keyCallback);
 
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK) {
@@ -348,14 +461,10 @@ int main() {
 
     Mesh sphere = makeSphere();
     Mesh plane = makePlane();
-
-    std::vector<Entity> scene = {
-        {&plane, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, true},
-        {&sphere, {0, 1.5f, 0}, {1.5f, 1.5f, 1.5f}, {0.9f, 0.25f, 0.2f}}, // bola utama
-        {&sphere, {-4, 1.0f, -2}, {1.0f, 1.0f, 1.0f}, {0.2f, 0.6f, 0.95f}},
-        {&sphere, {4, 0.7f, -1}, {0.7f, 0.7f, 0.7f}, {0.3f, 0.85f, 0.4f}},
-        {&sphere, {1.5f, 0.4f, 3}, {0.4f, 0.4f, 0.4f}, {0.95f, 0.8f, 0.2f}},
-    };
+    Mesh cube = makeCube();
+    Mesh cylinder = makeCylinder();
+    Entity ground = {&plane, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, true};
+    updateTitle(window);
 
     double last = glfwGetTime();
     while (!glfwWindowShouldClose(window)) {
@@ -366,7 +475,12 @@ int main() {
         glfwPollEvents();
         processInput(window, dt);
 
-        scene[1].position.y = 1.5f + 0.5f * std::sin((float)now * 1.5f); // bola utama naik-turun
+        Target tg = raycast();
+        if (g_clickPlace && tg.canPlace && std::fabs(tg.px) < 50 && std::fabs(tg.pz) < 50)
+            g_blocks.push_back({g_shape, tg.px, tg.py, tg.pz, PALETTE[g_colorIdx]});
+        if (g_clickRemove && tg.hitBlock >= 0) g_blocks.erase(g_blocks.begin() + tg.hitBlock);
+        if (g_clickPlace || g_clickRemove) updateTitle(window);
+        g_clickPlace = g_clickRemove = false;
 
         int w, h;
         glfwGetFramebufferSize(window, &w, &h);
@@ -384,19 +498,26 @@ int main() {
         glUniform3f(uLightPos, 6.0f, 10.0f, 6.0f);
         glUniform3f(uCamPos, g_camera.position.x, g_camera.position.y, g_camera.position.z);
 
-        for (const Entity& e : scene) {
+        auto drawEntity = [&](const Entity& e) {
             Mat4 model = translate(e.position) * scale(e.scale);
             glUniformMatrix4fv(uModel, 1, GL_FALSE, model.m);
             glUniform3f(uColor, e.color.x, e.color.y, e.color.z);
             glUniform1i(uChecker, e.checker ? 1 : 0);
             e.mesh->draw();
-        }
+        };
+        drawEntity(ground);
+        for (const Block& bl : g_blocks)
+            drawEntity({bl.shape == 0 ? &cube : &cylinder, {bl.x + 0.5f, bl.y + 0.5f, bl.z + 0.5f}, {1, 1, 1}, bl.color});
+        if (tg.canPlace) // penanda sel tempat blok akan dipasang
+            drawEntity({&sphere, {tg.px + 0.5f, tg.py + 0.5f, tg.pz + 0.5f}, {0.12f, 0.12f, 0.12f}, PALETTE[g_colorIdx]});
 
         glfwSwapBuffers(window);
     }
 
     sphere.destroy();
     plane.destroy();
+    cube.destroy();
+    cylinder.destroy();
     glDeleteProgram(program);
     glfwDestroyWindow(window);
     glfwTerminate();
