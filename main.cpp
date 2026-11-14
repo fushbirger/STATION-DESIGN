@@ -28,7 +28,7 @@ static Vec3 normalize(const Vec3& v) {
 }
 static float radians(float deg) { return deg * 3.14159265358979f / 180.0f; }
 
-// Matriks 4x4 column-major
+// 4x4 column-major matrix
 struct Mat4 {
     float m[16] = {0};
     static Mat4 identity() {
@@ -84,7 +84,7 @@ static Mat4 lookAt(const Vec3& eye, const Vec3& center, const Vec3& up) {
 
 struct Camera {
     Vec3 position{0.0f, 2.0f, 8.0f};
-    float yaw = -90.0f; // -90 = menghadap -Z
+    float yaw = -90.0f; // -90 = facing -Z
     float pitch = -10.0f;
     float fov = 60.0f;
     float speed = 5.0f;
@@ -112,7 +112,7 @@ struct Mesh {
     GLuint vao = 0, vbo = 0, ebo = 0;
     GLsizei indexCount = 0;
 
-    // Vertex berformat [posisi(3), normal(3)]
+    // Vertex format: [position(3), normal(3)]
     void upload(const std::vector<float>& vertices, const std::vector<unsigned>& indices) {
         indexCount = (GLsizei)indices.size();
         glGenVertexArrays(1, &vao);
@@ -152,7 +152,7 @@ static Mesh makeSphere(int stacks = 32, int sectors = 64) {
             float x = std::sin(phi) * std::cos(theta);
             float y = std::cos(phi);
             float z = std::sin(phi) * std::sin(theta);
-            v.insert(v.end(), {x, y, z, x, y, z}); // normal = posisi
+            v.insert(v.end(), {x, y, z, x, y, z}); // normal = position
         }
     }
     for (int i = 0; i < stacks; i++) {
@@ -181,7 +181,7 @@ static Mesh makePlane(float half = 50.0f) {
 }
 
 
-// Kubus 1x1x1 berpusat di origin (bentuk "kotak")
+// 1x1x1 cube centered at the origin ("square" shape)
 static Mesh makeCube() {
     std::vector<float> v;
     std::vector<unsigned> idx;
@@ -201,12 +201,12 @@ static Mesh makeCube() {
     return m;
 }
 
-// Silinder diameter 1, tinggi 1 berpusat di origin (bentuk "lingkaran")
+// Cylinder with diameter 1 and height 1 centered at the origin ("circle" shape)
 static Mesh makeCylinder(int seg = 32) {
     std::vector<float> v;
     std::vector<unsigned> idx;
     const float PI = 3.14159265358979f;
-    for (int i = 0; i <= seg; i++) { // sisi
+    for (int i = 0; i <= seg; i++) { // side
         float t = 2.0f * PI * i / seg, x = std::cos(t), z = std::sin(t);
         v.insert(v.end(), {0.5f * x, -0.5f, 0.5f * z, x, 0, z, 0.5f * x, 0.5f, 0.5f * z, x, 0, z});
     }
@@ -214,7 +214,7 @@ static Mesh makeCylinder(int seg = 32) {
         unsigned a = i * 2;
         idx.insert(idx.end(), {a, a + 2, a + 1, a + 1, a + 2, a + 3});
     }
-    for (int cap = 0; cap < 2; cap++) { // tutup atas & bawah
+    for (int cap = 0; cap < 2; cap++) { // top & bottom caps
         float y = cap ? 0.5f : -0.5f, ny = cap ? 1.0f : -1.0f;
         unsigned c = (unsigned)(v.size() / 6);
         v.insert(v.end(), {0, y, 0, 0, ny, 0});
@@ -332,8 +332,8 @@ static bool g_firstMouse = true;
 static double g_lastX = 0, g_lastY = 0;
 
 
-// ---------- Sistem blok ----------
-struct Block { int shape; int x, y, z; Vec3 color; }; // shape 0 = kotak, 1 = lingkaran
+// ---------- Block system ----------
+struct Block { int shape; int x, y, z; Vec3 color; }; // shape 0 = square, 1 = circle
 static std::vector<Block> g_blocks;
 static int g_shape = 0, g_colorIdx = 0;
 static bool g_clickPlace = false, g_clickRemove = false;
@@ -349,7 +349,7 @@ static int findBlock(int x, int y, int z) {
 
 struct Target { bool canPlace = false; int px = 0, py = 0, pz = 0; int hitBlock = -1; };
 
-// Tembak sinar dari tengah layar: cari blok yang kena / sel kosong di depannya
+// Cast a ray from the screen center: find the block hit and the empty cell in front of it
 static Target raycast() {
     Target t;
     Vec3 o = g_camera.position, d = g_camera.front();
@@ -357,7 +357,7 @@ static Target raycast() {
     bool havePrev = false;
     for (float s = 0; s < 20.0f; s += 0.02f) {
         Vec3 p = o + d * s;
-        if (p.y < 0) break; // kena lantai
+        if (p.y < 0) break; // hit the floor
         int cx = (int)std::floor(p.x), cy = (int)std::floor(p.y), cz = (int)std::floor(p.z);
         if (havePrev && cx == lx && cy == ly && cz == lz) continue;
         int b = findBlock(cx, cy, cz);
@@ -370,8 +370,8 @@ static Target raycast() {
 
 static void updateTitle(GLFWwindow* w) {
     char buf[128];
-    std::snprintf(buf, sizeof(buf), "Station Design | Bentuk: %s | Blok: %d",
-                  g_shape == 0 ? "Kotak" : "Lingkaran", (int)g_blocks.size());
+    std::snprintf(buf, sizeof(buf), "Station Design | Shape: %s | Blocks: %d",
+                  g_shape == 0 ? "Square" : "Circle", (int)g_blocks.size());
     glfwSetWindowTitle(w, buf);
 }
 
@@ -420,7 +420,7 @@ static void processInput(GLFWwindow* w, float dt) {
 
 int main() {
     if (!glfwInit()) {
-        std::fprintf(stderr, "Gagal init GLFW\n");
+        std::fprintf(stderr, "Failed to init GLFW\n");
         return 1;
     }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -430,7 +430,7 @@ int main() {
 
     GLFWwindow* window = glfwCreateWindow(1280, 720, "Station Design", nullptr, nullptr);
     if (!window) {
-        std::fprintf(stderr, "Gagal membuat window\n");
+        std::fprintf(stderr, "Failed to create window\n");
         glfwTerminate();
         return 1;
     }
@@ -444,7 +444,7 @@ int main() {
 
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK) {
-        std::fprintf(stderr, "Gagal init GLEW\n");
+        std::fprintf(stderr, "Failed to init GLEW\n");
         return 1;
     }
     glEnable(GL_DEPTH_TEST);
@@ -508,7 +508,7 @@ int main() {
         drawEntity(ground);
         for (const Block& bl : g_blocks)
             drawEntity({bl.shape == 0 ? &cube : &cylinder, {bl.x + 0.5f, bl.y + 0.5f, bl.z + 0.5f}, {1, 1, 1}, bl.color});
-        if (tg.canPlace) // penanda sel tempat blok akan dipasang
+        if (tg.canPlace) // marker for the cell where the next block will be placed
             drawEntity({&sphere, {tg.px + 0.5f, tg.py + 0.5f, tg.pz + 0.5f}, {0.12f, 0.12f, 0.12f}, PALETTE[g_colorIdx]});
 
         glfwSwapBuffers(window);
