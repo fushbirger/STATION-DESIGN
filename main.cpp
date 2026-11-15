@@ -5,6 +5,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <sstream>
+#include <string>
 #include <vector>
 
 struct Vec3 {
@@ -333,13 +339,118 @@ static double g_lastX = 0, g_lastY = 0;
 
 
 // ---------- Block system ----------
-struct Block { int shape; int x, y, z; Vec3 color; }; // shape 0 = square, 1 = circle
+struct Block { int shape; int x, y, z; Vec3 color; }; // shape = index into g_shapes
 static std::vector<Block> g_blocks;
+static std::vector<Mesh> g_shapes;           // 0 = square, 1 = circle, 2+ = loaded models
+static std::vector<std::string> g_shapeNames;
 static int g_shape = 0, g_colorIdx = 0;
 static bool g_clickPlace = false, g_clickRemove = false;
 static const Vec3 PALETTE[] = {{0.85f, 0.85f, 0.85f}, {0.9f, 0.25f, 0.2f}, {0.2f, 0.6f, 0.95f},
                                {0.3f, 0.85f, 0.4f}, {0.95f, 0.8f, 0.2f}, {0.6f, 0.4f, 0.25f}};
 static const int PALETTE_N = 6;
+
+
+// ---------- Model loading (Wavefront .obj) ----------
+#ifndef ASSET_DIR
+#define ASSET_DIR "assets"
+#endif
+
+// Resolve a 1-based (or negative, relative) OBJ index to a 0-based index
+static int objIndex(int i, size_t count) { return i > 0 ? i - 1 : (int)count + i; }
+
+// Parses an .obj file into flat triangle data [position(3), normal(3)].
+// Supports v / vn / f (v, v/vt, v//vn, v/vt/vn), n-gons and negative indices.
+static bool loadOBJ(const std::string& path, std::vector<float>& verts, std::vector<unsigned>& idx) {
+    std::ifstream in(path);
+    if (!in) return false;
+    std::vector<Vec3> pos, nrm;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        std::string tag;
+        ss >> tag;
+        if (tag == "v") {
+            Vec3 p; ss >> p.x >> p.y >> p.z; pos.push_back(p);
+        } else if (tag == "vn") {
+            Vec3 n; ss >> n.x >> n.y >> n.z; nrm.push_back(n);
+        } else if (tag == "f") {
+            std::vector<int> pi, ni;
+            std::string tok;
+            while (ss >> tok) {
+                int p = 0, t = 0, n = 0;
+                if (std::sscanf(tok.c_str(), "%d/%d/%d", &p, &t, &n) == 3) {}
+                else if (std::sscanf(tok.c_str(), "%d//%d", &p, &n) == 2) {}
+                else if (std::sscanf(tok.c_str(), "%d/%d", &p, &t) == 2) {}
+                else std::sscanf(tok.c_str(), "%d", &p);
+                if (p == 0) continue;
+                pi.push_back(objIndex(p, pos.size()));
+                ni.push_back(n ? objIndex(n, nrm.size()) : -1);
+            }
+            for (size_t k = 1; k + 1 < pi.size(); k++) { // triangle fan
+                size_t c[3] = {0, k, k + 1};
+                bool ok = true;
+                for (size_t q : c) if (pi[q] < 0 || pi[q] >= (int)pos.size()) ok = false;
+                if (!ok) continue;
+                Vec3 fn = normalize(cross(pos[pi[c[1]]] - pos[pi[c[0]]], pos[pi[c[2]]] - pos[pi[c[0]]]));
+                for (size_t q : c) {
+                    Vec3 p = pos[pi[q]];
+                    Vec3 n = (ni[q] >= 0 && ni[q] < (int)nrm.size()) ? nrm[ni[q]] : fn;
+                    idx.push_back((unsigned)(verts.size() / 6));
+                    verts.insert(verts.end(), {p.x, p.y, p.z, n.x, n.y, n.z});
+                }
+            }
+        }
+    }
+    if (verts.empty()) return false;
+
+    // Fit the model into one grid cell: centered on X/Z, sitting on the cell floor
+    const float INF = std::numeric_limits<float>::max();
+    Vec3 mn(INF, INF, INF), mx(-INF, -INF, -INF);
+    for (size_t i = 0; i < verts.size(); i += 6) {
+        mn.x = std::min(mn.x, verts[i]);     mx.x = std::max(mx.x, verts[i]);
+        mn.y = std::min(mn.y, verts[i + 1]); mx.y = std::max(mx.y, verts[i + 1]);
+        mn.z = std::min(mn.z, verts[i + 2]); mx.z = std::max(mx.z, verts[i + 2]);
+    }
+    float ext = std::max(mx.x - mn.x, std::max(mx.y - mn.y, mx.z - mn.z));
+    float k = ext > 0 ? 1.0f / ext : 1.0f;
+    for (size_t i = 0; i < verts.size(); i += 6) {
+        verts[i]     = (verts[i]     - (mn.x + mx.x) * 0.5f) * k;
+        verts[i + 1] = (verts[i + 1] - mn.y) * k - 0.5f;
+        verts[i + 2] = (verts[i + 2] - (mn.z + mx.z) * 0.5f) * k;
+    }
+    return true;
+}
+
+// Loads every .obj in <ASSET_DIR>/model and registers it as a placeable shape
+static void loadModels() {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::path(ASSET_DIR) / "model";
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        std::fprintf(stderr, "Model folder not found: %s\n", dir.string().c_str());
+        return;
+    }
+    std::vector<fs::path> files;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        std::string ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+        if (entry.is_regular_file() && ext == ".obj") files.push_back(entry.path());
+    }
+    std::sort(files.begin(), files.end());
+    for (const fs::path& f : files) {
+        std::vector<float> verts;
+        std::vector<unsigned> idx;
+        if (!loadOBJ(f.string(), verts, idx)) {
+            std::fprintf(stderr, "Failed to load model: %s\n", f.string().c_str());
+            continue;
+        }
+        Mesh m;
+        m.upload(verts, idx);
+        g_shapes.push_back(m);
+        g_shapeNames.push_back(f.stem().string());
+        std::printf("Loaded model: %s (%zu triangles)\n", f.filename().string().c_str(), idx.size() / 3);
+    }
+}
 
 static int findBlock(int x, int y, int z) {
     for (size_t i = 0; i < g_blocks.size(); i++)
@@ -369,9 +480,9 @@ static Target raycast() {
 }
 
 static void updateTitle(GLFWwindow* w) {
-    char buf[128];
+    char buf[192];
     std::snprintf(buf, sizeof(buf), "Station Design | Shape: %s | Blocks: %d",
-                  g_shape == 0 ? "Square" : "Circle", (int)g_blocks.size());
+                  g_shapeNames[g_shape].c_str(), (int)g_blocks.size());
     glfwSetWindowTitle(w, buf);
 }
 
@@ -383,8 +494,11 @@ static void mouseButtonCallback(GLFWwindow*, int button, int action, int) {
 
 static void keyCallback(GLFWwindow* w, int key, int, int action, int) {
     if (action != GLFW_PRESS) return;
+    int n = (int)g_shapes.size();
     if (key == GLFW_KEY_1) g_shape = 0;
     if (key == GLFW_KEY_2) g_shape = 1;
+    if (key == GLFW_KEY_E) g_shape = (g_shape + 1) % n;     // next shape / model
+    if (key == GLFW_KEY_Q) g_shape = (g_shape + n - 1) % n; // previous shape / model
     if (key == GLFW_KEY_C) g_colorIdx = (g_colorIdx + 1) % PALETTE_N;
     updateTitle(w);
 }
@@ -461,8 +575,11 @@ int main() {
 
     Mesh sphere = makeSphere();
     Mesh plane = makePlane();
-    Mesh cube = makeCube();
-    Mesh cylinder = makeCylinder();
+    g_shapes.push_back(makeCube());
+    g_shapeNames.push_back("Square");
+    g_shapes.push_back(makeCylinder());
+    g_shapeNames.push_back("Circle");
+    loadModels();
     Entity ground = {&plane, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, true};
     updateTitle(window);
 
@@ -507,7 +624,7 @@ int main() {
         };
         drawEntity(ground);
         for (const Block& bl : g_blocks)
-            drawEntity({bl.shape == 0 ? &cube : &cylinder, {bl.x + 0.5f, bl.y + 0.5f, bl.z + 0.5f}, {1, 1, 1}, bl.color});
+            drawEntity({&g_shapes[bl.shape], {bl.x + 0.5f, bl.y + 0.5f, bl.z + 0.5f}, {1, 1, 1}, bl.color});
         if (tg.canPlace) // marker for the cell where the next block will be placed
             drawEntity({&sphere, {tg.px + 0.5f, tg.py + 0.5f, tg.pz + 0.5f}, {0.12f, 0.12f, 0.12f}, PALETTE[g_colorIdx]});
 
@@ -516,8 +633,7 @@ int main() {
 
     sphere.destroy();
     plane.destroy();
-    cube.destroy();
-    cylinder.destroy();
+    for (Mesh& m : g_shapes) m.destroy();
     glDeleteProgram(program);
     glfwDestroyWindow(window);
     glfwTerminate();
