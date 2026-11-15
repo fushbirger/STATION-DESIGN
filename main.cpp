@@ -424,18 +424,29 @@ static bool loadOBJ(const std::string& path, std::vector<float>& verts, std::vec
 // Loads every .obj in <ASSET_DIR>/model and registers it as a placeable shape
 static void loadModels() {
     namespace fs = std::filesystem;
-    fs::path dir = fs::path(ASSET_DIR) / "model";
     std::error_code ec;
-    if (!fs::is_directory(dir, ec)) {
-        std::fprintf(stderr, "Model folder not found: %s\n", dir.string().c_str());
+    // Try the compiled-in path first, then common locations relative to the working directory
+    const fs::path candidates[] = {fs::path(ASSET_DIR) / "model", fs::path("assets") / "model",
+                                   fs::path("..") / "assets" / "model", fs::path("..") / ".." / "assets" / "model"};
+    fs::path dir;
+    bool found = false;
+    for (const fs::path& c : candidates) {
+        if (fs::is_directory(c, ec)) { dir = c; found = true; break; }
+    }
+    if (!found) {
+        std::fprintf(stderr, "Model folder not found. Looked in:\n");
+        for (const fs::path& c : candidates)
+            std::fprintf(stderr, "  %s\n", fs::absolute(c, ec).string().c_str());
         return;
     }
+    std::printf("Loading models from: %s\n", fs::absolute(dir, ec).string().c_str());
     std::vector<fs::path> files;
     for (const auto& entry : fs::directory_iterator(dir, ec)) {
         std::string ext = entry.path().extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
         if (entry.is_regular_file() && ext == ".obj") files.push_back(entry.path());
     }
+    if (files.empty()) std::fprintf(stderr, "No .obj files found in that folder.\n");
     std::sort(files.begin(), files.end());
     for (const fs::path& f : files) {
         std::vector<float> verts;

@@ -13,3 +13,4 @@ find_package(glfw3 REQUIRED)
 
 add_executable(engine main.cpp)
 target_link_libraries(engine PRIVATE OpenGL::GL GLEW::GLEW glfw)
+target_compile_definitions(engine PRIVATE ASSET_DIR="${CMAKE_SOURCE_DIR}/assets")
