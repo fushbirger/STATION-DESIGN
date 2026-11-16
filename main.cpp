@@ -1,6 +1,10 @@
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +26,8 @@ struct Vec3 {
     Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
     Vec3& operator+=(const Vec3& o) { x += o.x; y += o.y; z += o.z; return *this; }
     Vec3& operator-=(const Vec3& o) { x -= o.x; y -= o.y; z -= o.z; return *this; }
+    float& operator[](int i) { return i == 0 ? x : (i == 1 ? y : z); }
+    float operator[](int i) const { return i == 0 ? x : (i == 1 ? y : z); }
 };
 
 static float dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -63,6 +69,33 @@ static Mat4 scale(const Vec3& s) {
     Mat4 r = Mat4::identity();
     r.m[0] = s.x; r.m[5] = s.y; r.m[10] = s.z;
     return r;
+}
+static Mat4 rotateX(float rad) {
+    Mat4 r = Mat4::identity();
+    r.m[5] = std::cos(rad); r.m[6] = std::sin(rad);
+    r.m[9] = -std::sin(rad); r.m[10] = std::cos(rad);
+    return r;
+}
+static Mat4 rotateY(float rad) {
+    Mat4 r = Mat4::identity();
+    r.m[0] = std::cos(rad); r.m[8] = std::sin(rad);
+    r.m[2] = -std::sin(rad); r.m[10] = std::cos(rad);
+    return r;
+}
+static Mat4 rotateZ(float rad) {
+    Mat4 r = Mat4::identity();
+    r.m[0] = std::cos(rad); r.m[1] = std::sin(rad);
+    r.m[4] = -std::sin(rad); r.m[5] = std::cos(rad);
+    return r;
+}
+// Rotate a direction by the 3x3 part of m, or by its inverse (transpose) for pure rotations
+static Vec3 mulDir(const Mat4& m, const Vec3& v) {
+    return {m.m[0] * v.x + m.m[4] * v.y + m.m[8] * v.z, m.m[1] * v.x + m.m[5] * v.y + m.m[9] * v.z,
+            m.m[2] * v.x + m.m[6] * v.y + m.m[10] * v.z};
+}
+static Vec3 mulDirT(const Mat4& m, const Vec3& v) {
+    return {m.m[0] * v.x + m.m[1] * v.y + m.m[2] * v.z, m.m[4] * v.x + m.m[5] * v.y + m.m[6] * v.z,
+            m.m[8] * v.x + m.m[9] * v.y + m.m[10] * v.z};
 }
 static Mat4 perspective(float fovRad, float aspect, float zn, float zf) {
     Mat4 r;
@@ -238,6 +271,49 @@ static Mesh makeCylinder(int seg = 32) {
     return m;
 }
 
+// Cone with base diameter 1 and height 1 centered at the origin, apex up (arrow heads)
+static Mesh makeCone(int seg = 24) {
+    std::vector<float> v;
+    std::vector<unsigned> idx;
+    const float PI = 3.14159265358979f;
+    for (int i = 0; i <= seg; i++) {
+        float t = 2.0f * PI * i / seg, x = std::cos(t), z = std::sin(t);
+        Vec3 n = normalize(Vec3(x, 0.5f, z));
+        v.insert(v.end(), {0.5f * x, -0.5f, 0.5f * z, n.x, n.y, n.z, 0, 0.5f, 0, n.x, n.y, n.z});
+    }
+    for (int i = 0; i < seg; i++) {
+        unsigned a = i * 2;
+        idx.insert(idx.end(), {a, a + 2, a + 1});
+    }
+    Mesh m;
+    m.upload(v, idx);
+    return m;
+}
+
+// Ring in the XZ plane (axis = Y), major radius 1, thin tube (rotation handles)
+static Mesh makeTorus(int segs = 48, int sides = 10) {
+    std::vector<float> v;
+    std::vector<unsigned> idx;
+    const float PI = 3.14159265358979f, minor = 0.03f;
+    for (int i = 0; i <= segs; i++) {
+        float th = 2.0f * PI * i / segs;
+        for (int j = 0; j <= sides; j++) {
+            float ph = 2.0f * PI * j / sides;
+            Vec3 n(std::cos(ph) * std::cos(th), std::sin(ph), std::cos(ph) * std::sin(th));
+            Vec3 p = Vec3(std::cos(th), 0, std::sin(th)) + n * minor;
+            v.insert(v.end(), {p.x, p.y, p.z, n.x, n.y, n.z});
+        }
+    }
+    for (int i = 0; i < segs; i++)
+        for (int j = 0; j < sides; j++) {
+            unsigned a = i * (sides + 1) + j, b = a + sides + 1;
+            idx.insert(idx.end(), {a, b, a + 1, a + 1, b, b + 1});
+        }
+    Mesh m;
+    m.upload(v, idx);
+    return m;
+}
+
 static const char* VERT_SRC = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
@@ -325,32 +401,37 @@ static GLuint makeProgram() {
     return p;
 }
 
-struct Entity {
-    const Mesh* mesh;
-    Vec3 position;
-    Vec3 scale;
-    Vec3 color;
-    bool checker = false;
-};
 
 static Camera g_camera;
 static bool g_firstMouse = true;
 static double g_lastX = 0, g_lastY = 0;
 
 
-// ---------- Block system ----------
-struct Block { int shape; int x, y, z; Vec3 color; }; // shape = index into g_shapes
-static std::vector<Block> g_blocks;
-static std::vector<Mesh> g_shapes;           // 0 = square, 1 = circle, 2+ = loaded models
+//   Scene objects  
+struct Object { int shape; Vec3 pos, scale, color; Mat4 rot = Mat4::identity(); }; // shape = index into g_shapes
+static std::vector<Object> g_objects;
+static int g_selected = -1;                   // index into g_objects, -1 = none
+static std::vector<Mesh> g_shapes;            // 0 = square, 1 = circle, 2+ = loaded models
 static std::vector<std::string> g_shapeNames;
-static int g_shape = 0, g_colorIdx = 0;
-static bool g_clickPlace = false, g_clickRemove = false;
+static int g_shape = 0;                       // shape used when placing
 static const Vec3 PALETTE[] = {{0.85f, 0.85f, 0.85f}, {0.9f, 0.25f, 0.2f}, {0.2f, 0.6f, 0.95f},
                                {0.3f, 0.85f, 0.4f}, {0.95f, 0.8f, 0.2f}, {0.6f, 0.4f, 0.25f}};
 static const int PALETTE_N = 6;
+static int g_colorIdx = 0;
+static Vec3 g_color = PALETTE[0];             // color used when placing
+
+enum Mode { MODE_BUILD, MODE_MOVE, MODE_SIZE, MODE_ROTATE, MODE_FREECAM };
+static Mode g_mode = MODE_BUILD, g_lastTool = MODE_BUILD;
+static bool g_lmbPressed = false;             // left click this frame (not over the UI)
+static bool g_rmbLook = false;                // right mouse held: look around
+
+static const int GIZMO_AXES = 3;              // 3 = X, Y and Z handles (2 = only X and Y)
+static const float GRID_SNAP = 0.25f;         // move / size step
+static const float MIN_SCALE = 0.25f;
+static const float ROT_SNAP = 3.14159265f / 12.0f; // 15 degrees
 
 
-// ---------- Model loading (Wavefront .obj) ----------
+//   Model loading (Wavefront .obj)  
 #ifndef ASSET_DIR
 #define ASSET_DIR "assets"
 #endif
@@ -463,65 +544,248 @@ static void loadModels() {
     }
 }
 
-static int findBlock(int x, int y, int z) {
-    for (size_t i = 0; i < g_blocks.size(); i++)
-        if (g_blocks[i].x == x && g_blocks[i].y == y && g_blocks[i].z == z) return (int)i;
-    return -1;
+//   Picking  
+struct Ray { Vec3 o, d; };
+
+// Ray from the camera through the mouse cursor
+static Ray cursorRay(GLFWwindow* w) {
+    double mx, my;
+    int ww, wh;
+    glfwGetCursorPos(w, &mx, &my);
+    glfwGetWindowSize(w, &ww, &wh);
+    if (wh == 0) wh = 1;
+    float nx = 2.0f * (float)mx / ww - 1.0f, ny = 1.0f - 2.0f * (float)my / wh;
+    float th = std::tan(radians(g_camera.fov) / 2.0f), aspect = (float)ww / wh;
+    Vec3 f = g_camera.front(), r = g_camera.right(), u = cross(r, f);
+    return {g_camera.position, normalize(f + r * (nx * th * aspect) + u * (ny * th))};
 }
 
-struct Target { bool canPlace = false; int px = 0, py = 0, pz = 0; int hitBlock = -1; };
-
-// Cast a ray from the screen center: find the block hit and the empty cell in front of it
-static Target raycast() {
-    Target t;
-    Vec3 o = g_camera.position, d = g_camera.front();
-    int lx = 0, ly = 0, lz = 0;
-    bool havePrev = false;
-    for (float s = 0; s < 20.0f; s += 0.02f) {
-        Vec3 p = o + d * s;
-        if (p.y < 0) break; // hit the floor
-        int cx = (int)std::floor(p.x), cy = (int)std::floor(p.y), cz = (int)std::floor(p.z);
-        if (havePrev && cx == lx && cy == ly && cz == lz) continue;
-        int b = findBlock(cx, cy, cz);
-        if (b >= 0) { t.hitBlock = b; break; }
-        lx = cx; ly = cy; lz = cz; havePrev = true;
+// Ray vs axis-aligned box. Returns entry distance and the face normal hit.
+static bool rayAABB(const Ray& ray, const Vec3& mn, const Vec3& mx, float& tHit, Vec3& normal) {
+    float tmin = -1e9f, tmax = 1e9f;
+    Vec3 n;
+    for (int i = 0; i < 3; i++) {
+        if (std::fabs(ray.d[i]) < 1e-8f) {
+            if (ray.o[i] < mn[i] || ray.o[i] > mx[i]) return false;
+            continue;
+        }
+        float t1 = (mn[i] - ray.o[i]) / ray.d[i], t2 = (mx[i] - ray.o[i]) / ray.d[i], sign = -1.0f;
+        if (t1 > t2) { std::swap(t1, t2); sign = 1.0f; }
+        if (t1 > tmin) { tmin = t1; n = Vec3(); n[i] = sign; }
+        tmax = std::min(tmax, t2);
+        if (tmin > tmax) return false;
     }
-    if (havePrev) { t.canPlace = true; t.px = lx; t.py = ly; t.pz = lz; }
-    return t;
+    if (tmin < 0) return false; // camera inside the box
+    tHit = tmin;
+    normal = n;
+    return true;
 }
 
-static void updateTitle(GLFWwindow* w) {
-    char buf[192];
-    std::snprintf(buf, sizeof(buf), "Station Design | Shape: %s | Blocks: %d",
-                  g_shapeNames[g_shape].c_str(), (int)g_blocks.size());
-    glfwSetWindowTitle(w, buf);
+// Ray vs rotated box: the box is [mn, mx] in a frame centered at c and rotated by R
+static bool rayBox(const Ray& ray, const Vec3& c, const Mat4& R, const Vec3& mn, const Vec3& mx, float& t, Vec3& n) {
+    Ray local{mulDirT(R, ray.o - c), mulDirT(R, ray.d)};
+    Vec3 nl;
+    if (!rayAABB(local, mn, mx, t, nl)) return false;
+    n = mulDir(R, nl);
+    return true;
 }
 
-static void mouseButtonCallback(GLFWwindow*, int button, int action, int) {
-    if (action != GLFW_PRESS) return;
-    if (button == GLFW_MOUSE_BUTTON_LEFT) g_clickPlace = true;
-    if (button == GLFW_MOUSE_BUTTON_RIGHT) g_clickRemove = true;
+struct Hit { bool hit = false; float t = 0; Vec3 normal; int object = -1; }; // object -1 = ground
+
+static Hit raycastScene(const Ray& ray) {
+    Hit best;
+    best.t = 200.0f;
+    for (size_t i = 0; i < g_objects.size(); i++) {
+        const Object& o = g_objects[i];
+        Vec3 h = o.scale * 0.5f, n;
+        float t;
+        if (rayBox(ray, o.pos, o.rot, h * -1.0f, h, t, n) && t < best.t) best = {true, t, n, (int)i};
+    }
+    if (ray.d.y < -1e-6f) {
+        float t = -ray.o.y / ray.d.y;
+        if (t > 0 && t < best.t) best = {true, t, Vec3(0, 1, 0), -1};
+    }
+    return best;
+}
+
+// Grid cell (as a center point) next to the face that was hit. False if outside the floor.
+static bool hitCell(const Hit& h, const Ray& ray, Vec3& center) {
+    if (!h.hit) return false;
+    Vec3 p = ray.o + ray.d * h.t + h.normal * 0.01f;
+    int cx = (int)std::floor(p.x), cy = (int)std::floor(p.y), cz = (int)std::floor(p.z);
+    if (cx < -50 || cx >= 50 || cz < -50 || cz >= 50 || cy < 0) return false;
+    center = Vec3(cx + 0.5f, cy + 0.5f, cz + 0.5f);
+    return true;
+}
+
+//   Gizmo (arrows for Move / Size, rings for Rotate)  
+static const Vec3 AXIS_DIR[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+static const Vec3 AXIS_COLOR[3] = {{0.95f, 0.25f, 0.2f}, {0.3f, 0.85f, 0.4f}, {0.2f, 0.5f, 0.95f}};
+
+static float snap(float v) { return std::round(v / GRID_SNAP) * GRID_SNAP; }
+static float snapAngle(float a) { return std::round(a / ROT_SNAP) * ROT_SNAP; }
+static Mat4 rotAboutAxis(int a, float ang) { return a == 0 ? rotateX(ang) : (a == 1 ? rotateY(ang) : rotateZ(ang)); }
+
+// Position along the line (origin + t * D) that is closest to the mouse ray
+static bool axisParam(const Ray& ray, const Vec3& origin, const Vec3& D, float& t) {
+    Vec3 w0 = origin - ray.o;
+    float b = dot(D, ray.d), d = dot(D, w0), e = dot(ray.d, w0), den = 1.0f - b * b;
+    if (std::fabs(den) < 1e-4f) return false; // ray parallel to the axis
+    t = (b * e - d) / den;
+    return true;
+}
+
+// Where the mouse ray crosses the plane of a rotation ring (p is relative to the center c)
+static bool ringPoint(const Ray& ray, const Vec3& c, int a, Vec3& p, float& t) {
+    Vec3 n = AXIS_DIR[a];
+    float den = dot(ray.d, n);
+    if (std::fabs(den) < 1e-3f) return false;
+    t = dot(c - ray.o, n) / den;
+    if (t <= 0) return false;
+    p = ray.o + ray.d * t - c;
+    return true;
+}
+static float ringAngle(const Vec3& p, int a) {
+    return std::atan2(dot(p, AXIS_DIR[(a + 2) % 3]), dot(p, AXIS_DIR[(a + 1) % 3]));
+}
+
+static float gizmoK() { // keeps handles a readable size at any camera distance
+    Vec3 d = g_objects[g_selected].pos - g_camera.position;
+    return std::max(0.5f, std::sqrt(dot(d, d)) * 0.1f);
+}
+// Size arrows follow the object's own (rotated) axes, Move arrows follow the world axes
+static Mat4 gizmoFrame(const Object& o) { return g_mode == MODE_SIZE ? o.rot : Mat4::identity(); }
+static float maxScale(const Object& o) { return std::max(o.scale.x, std::max(o.scale.y, o.scale.z)); }
+static float gizmoLen(const Object& o, int axis, float k) {
+    return (g_mode == MODE_SIZE ? o.scale[axis] : maxScale(o)) * 0.5f + k;
+}
+static float ringRadius(const Object& o, float k) { return 0.6f * maxScale(o) + 0.5f * k; }
+
+// Which handle (axis 0..2) is under the mouse, or -1
+static int pickGizmo(const Ray& ray) {
+    if (g_selected < 0) return -1;
+    const Object& o = g_objects[g_selected];
+    float k = gizmoK(), best = 1e9f;
+    int axis = -1;
+    for (int a = 0; a < GIZMO_AXES; a++) {
+        float t = 0;
+        if (g_mode == MODE_ROTATE) {
+            Vec3 p;
+            if (ringPoint(ray, o.pos, a, p, t) && std::fabs(std::sqrt(dot(p, p)) - ringRadius(o, k)) < 0.15f * k && t < best) {
+                best = t;
+                axis = a;
+            }
+        } else {
+            Vec3 pad = Vec3(0.12f, 0.12f, 0.12f) * k, mn = pad * -1.0f, mx = pad, n;
+            mn[a] = 0;
+            mx[a] = gizmoLen(o, a, k);
+            if (rayBox(ray, o.pos, gizmoFrame(o), mn, mx, t, n) && t < best) { best = t; axis = a; }
+        }
+    }
+    return axis;
+}
+
+struct Drag {
+    bool active = false;
+    int axis = 0;
+    float t0 = 0, angle0 = 0;
+    Vec3 pos, scale;
+    Mat4 rot, frame;
+};
+static Drag g_drag;
+
+static void beginDrag(const Ray& ray, int axis) {
+    const Object& o = g_objects[g_selected];
+    Drag d;
+    d.active = true; d.axis = axis; d.pos = o.pos; d.scale = o.scale; d.rot = o.rot; d.frame = gizmoFrame(o);
+    if (g_mode == MODE_ROTATE) {
+        Vec3 p;
+        float t;
+        if (!ringPoint(ray, o.pos, axis, p, t)) return;
+        d.angle0 = ringAngle(p, axis);
+    } else if (!axisParam(ray, o.pos, mulDir(d.frame, AXIS_DIR[axis]), d.t0)) {
+        return;
+    }
+    g_drag = d;
+}
+
+static void updateDrag(const Ray& ray) {
+    Object& o = g_objects[g_selected];
+    int a = g_drag.axis;
+    if (g_mode == MODE_ROTATE) {
+        Vec3 p;
+        float t;
+        if (!ringPoint(ray, g_drag.pos, a, p, t)) return;
+        o.rot = rotAboutAxis(a, snapAngle(ringAngle(p, a) - g_drag.angle0)) * g_drag.rot;
+        return;
+    }
+    Vec3 dir = mulDir(g_drag.frame, AXIS_DIR[a]);
+    float t;
+    if (!axisParam(ray, g_drag.pos, dir, t)) return;
+    float delta = snap(t - g_drag.t0);
+    if (g_mode == MODE_MOVE) {
+        o.pos = g_drag.pos + dir * delta;
+    } else { // Size: the pulled face follows the mouse, the opposite face stays put
+        float sc = std::max(MIN_SCALE, g_drag.scale[a] + delta);
+        o.scale[a] = sc;
+        o.pos = g_drag.pos + dir * ((sc - g_drag.scale[a]) * 0.5f);
+    }
+}
+
+//   Mode / selection  
+static void setMode(GLFWwindow* w, Mode m) {
+    if (m != MODE_FREECAM) g_lastTool = m;
+    g_mode = m;
+    g_drag.active = false;
+    glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL); // the cursor stays visible in every mode
+    g_firstMouse = true;
+}
+
+static void deleteSelected() {
+    if (g_selected < 0 || g_selected >= (int)g_objects.size()) return;
+    g_objects.erase(g_objects.begin() + g_selected);
+    g_selected = -1;
+    g_drag.active = false;
+}
+
+//   Input callbacks  
+static void mouseButtonCallback(GLFWwindow* w, int button, int action, int) {
+    bool overUI = ImGui::GetIO().WantCaptureMouse;
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS && !overUI) g_lmbPressed = true;
+    if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        if (action == GLFW_PRESS && g_mode != MODE_FREECAM && !overUI) { // hold RMB to look around
+            g_rmbLook = true;
+            glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            g_firstMouse = true;
+        } else if (action == GLFW_RELEASE && g_rmbLook) {
+            g_rmbLook = false;
+            if (g_mode != MODE_FREECAM) glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+    }
 }
 
 static void keyCallback(GLFWwindow* w, int key, int, int action, int) {
-    if (action != GLFW_PRESS) return;
+    if (action != GLFW_PRESS || ImGui::GetIO().WantCaptureKeyboard) return;
     int n = (int)g_shapes.size();
     if (key == GLFW_KEY_1) g_shape = 0;
     if (key == GLFW_KEY_2) g_shape = 1;
     if (key == GLFW_KEY_E) g_shape = (g_shape + 1) % n;     // next shape / model
     if (key == GLFW_KEY_Q) g_shape = (g_shape + n - 1) % n; // previous shape / model
-    if (key == GLFW_KEY_C) g_colorIdx = (g_colorIdx + 1) % PALETTE_N;
-    updateTitle(w);
+    if (key == GLFW_KEY_C) { g_colorIdx = (g_colorIdx + 1) % PALETTE_N; g_color = PALETTE[g_colorIdx]; }
+    if (key == GLFW_KEY_TAB) setMode(w, g_mode == MODE_FREECAM ? g_lastTool : MODE_FREECAM);
+    if (key == GLFW_KEY_DELETE) deleteSelected();
 }
 
 static void mouseCallback(GLFWwindow*, double x, double y) {
     if (g_firstMouse) { g_lastX = x; g_lastY = y; g_firstMouse = false; }
-    g_camera.look((float)(x - g_lastX), (float)(y - g_lastY));
+    bool freeLook = g_mode == MODE_FREECAM && !ImGui::GetIO().WantCaptureMouse; // not while over the UI
+    if (freeLook || g_rmbLook) g_camera.look((float)(x - g_lastX), (float)(y - g_lastY));
     g_lastX = x;
     g_lastY = y;
 }
 
 static void scrollCallback(GLFWwindow*, double, double yoff) {
+    if (ImGui::GetIO().WantCaptureMouse) return;
     g_camera.fov -= (float)yoff * 2.0f;
     if (g_camera.fov < 20.0f) g_camera.fov = 20.0f;
     if (g_camera.fov > 100.0f) g_camera.fov = 100.0f;
@@ -529,6 +793,7 @@ static void scrollCallback(GLFWwindow*, double, double yoff) {
 
 static void processInput(GLFWwindow* w, float dt) {
     if (glfwGetKey(w, GLFW_KEY_ESCAPE) == GLFW_PRESS) glfwSetWindowShouldClose(w, 1);
+    if (ImGui::GetIO().WantTextInput) return; // typing into a UI field
 
     float v = g_camera.speed * dt;
     if (glfwGetKey(w, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) v *= 3.0f;
@@ -541,6 +806,53 @@ static void processInput(GLFWwindow* w, float dt) {
     if (glfwGetKey(w, GLFW_KEY_A) == GLFW_PRESS) g_camera.position -= r * v;
     if (glfwGetKey(w, GLFW_KEY_SPACE) == GLFW_PRESS) g_camera.position += Vec3(0, 1, 0) * v;
     if (glfwGetKey(w, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) g_camera.position -= Vec3(0, 1, 0) * v;
+}
+
+//   UI  
+static void drawUI(GLFWwindow* w) {
+    ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Tools", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    const char* names[] = {"Build", "Move", "Size", "Rotate", "Free Cam"};
+    for (int i = 0; i < 5; i++) {
+        if (i > 0) ImGui::SameLine();
+        if (ImGui::RadioButton(names[i], (int)g_mode == i)) setMode(w, (Mode)i);
+    }
+    ImGui::ColorEdit3("Color", &g_color.x);
+    ImGui::TextDisabled("WASD/Space/Ctrl: fly   Hold RMB: look");
+    ImGui::TextDisabled("Free Cam: just move the mouse to look");
+    ImGui::TextDisabled("Tab: Free Cam on/off   Del: delete");
+    ImGui::End();
+
+    ImGui::SetNextWindowPos(ImVec2(10, 130), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(270, 430), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Objects");
+    ImGui::SeparatorText("Shape to place");
+    for (int i = 0; i < (int)g_shapes.size(); i++) {
+        ImGui::PushID(i);
+        if (ImGui::Selectable(g_shapeNames[i].c_str(), g_shape == i)) g_shape = i;
+        ImGui::PopID();
+    }
+    ImGui::SeparatorText("Placed objects");
+    ImGui::BeginChild("objlist", ImVec2(0, 140), ImGuiChildFlags_Borders);
+    for (int i = 0; i < (int)g_objects.size(); i++) {
+        char label[96];
+        std::snprintf(label, sizeof(label), "%d: %s", i + 1, g_shapeNames[g_objects[i].shape].c_str());
+        ImGui::PushID(i);
+        if (ImGui::Selectable(label, g_selected == i)) g_selected = i;
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    if (g_selected >= 0 && g_selected < (int)g_objects.size()) {
+        Object& o = g_objects[g_selected];
+        ImGui::SeparatorText("Selected");
+        ImGui::DragFloat3("Position", &o.pos.x, 0.05f);
+        ImGui::DragFloat3("Scale", &o.scale.x, 0.05f, MIN_SCALE, 50.0f);
+        ImGui::ColorEdit3("Tint", &o.color.x);
+        if (ImGui::Button("Reset rotation")) o.rot = Mat4::identity();
+        ImGui::SameLine();
+        if (ImGui::Button("Delete")) deleteSelected();
+    }
+    ImGui::End();
 }
 
 int main() {
@@ -561,7 +873,6 @@ int main() {
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     glfwSetCursorPosCallback(window, mouseCallback);
     glfwSetScrollCallback(window, scrollCallback);
     glfwSetMouseButtonCallback(window, mouseButtonCallback);
@@ -575,6 +886,12 @@ int main() {
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
 
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOpenGL(window, true); // chains the callbacks set above
+    ImGui_ImplOpenGL3_Init("#version 330");
+
     GLuint program = makeProgram();
     GLint uModel = glGetUniformLocation(program, "uModel");
     GLint uView = glGetUniformLocation(program, "uView");
@@ -586,13 +903,13 @@ int main() {
 
     Mesh sphere = makeSphere();
     Mesh plane = makePlane();
+    Mesh cone = makeCone();
+    Mesh torus = makeTorus();
     g_shapes.push_back(makeCube());
     g_shapeNames.push_back("Square");
     g_shapes.push_back(makeCylinder());
     g_shapeNames.push_back("Circle");
     loadModels();
-    Entity ground = {&plane, {0, 0, 0}, {1, 1, 1}, {1, 1, 1}, true};
-    updateTitle(window);
 
     double last = glfwGetTime();
     while (!glfwWindowShouldClose(window)) {
@@ -601,15 +918,50 @@ int main() {
         last = now;
 
         glfwPollEvents();
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        drawUI(window);
         processInput(window, dt);
 
-        Target tg = raycast();
-        if (g_clickPlace && tg.canPlace && std::fabs(tg.px) < 50 && std::fabs(tg.pz) < 50)
-            g_blocks.push_back({g_shape, tg.px, tg.py, tg.pz, PALETTE[g_colorIdx]});
-        if (g_clickRemove && tg.hitBlock >= 0) g_blocks.erase(g_blocks.begin() + tg.hitBlock);
-        if (g_clickPlace || g_clickRemove) updateTitle(window);
-        g_clickPlace = g_clickRemove = false;
+        // Free Cam: the cursor stays visible; mouse movement turns the camera,
+        // and holding the cursor at a window edge keeps turning that way.
+        if (g_mode == MODE_FREECAM && !ImGui::GetIO().WantCaptureMouse) {
+            double mx, my;
+            int ww, wh;
+            glfwGetCursorPos(window, &mx, &my);
+            glfwGetWindowSize(window, &ww, &wh);
+            const double margin = 24.0, edgeSpeed = 700.0; // pixels-equivalent per second
+            float ex = mx < margin ? -1.0f : (mx > ww - margin ? 1.0f : 0.0f);
+            float ey = my < margin ? -1.0f : (my > wh - margin ? 1.0f : 0.0f);
+            g_camera.look(ex * (float)edgeSpeed * dt, ey * (float)edgeSpeed * dt);
+        }
 
+        // ----- World interaction -----
+        bool editing = g_mode != MODE_FREECAM && !g_rmbLook && !ImGui::GetIO().WantCaptureMouse;
+        Ray ray = cursorRay(window);
+        Hit hit;
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) != GLFW_PRESS) g_drag.active = false;
+        if (g_drag.active && g_selected >= 0) updateDrag(ray);
+        else if (editing && g_mode == MODE_BUILD) hit = raycastScene(ray);
+
+        Vec3 cell;
+        bool hasCell = editing && g_mode == MODE_BUILD && hitCell(hit, ray, cell);
+        if (g_lmbPressed && editing) {
+            if (g_mode == MODE_BUILD) {
+                if (hasCell) {
+                    g_objects.push_back({g_shape, cell, Vec3(1, 1, 1), g_color});
+                    g_selected = (int)g_objects.size() - 1;
+                }
+            } else {
+                int axis = pickGizmo(ray);
+                if (axis >= 0) beginDrag(ray, axis);
+                else g_selected = raycastScene(ray).object; // click empty space / ground = deselect
+            }
+        }
+        g_lmbPressed = false;
+
+        // ----- Render -----
         int w, h;
         glfwGetFramebufferSize(window, &w, &h);
         if (h == 0) h = 1;
@@ -626,24 +978,55 @@ int main() {
         glUniform3f(uLightPos, 6.0f, 10.0f, 6.0f);
         glUniform3f(uCamPos, g_camera.position.x, g_camera.position.y, g_camera.position.z);
 
-        auto drawEntity = [&](const Entity& e) {
-            Mat4 model = translate(e.position) * scale(e.scale);
+        auto drawMesh = [&](const Mesh& m, const Mat4& model, const Vec3& c, bool checker) {
             glUniformMatrix4fv(uModel, 1, GL_FALSE, model.m);
-            glUniform3f(uColor, e.color.x, e.color.y, e.color.z);
-            glUniform1i(uChecker, e.checker ? 1 : 0);
-            e.mesh->draw();
+            glUniform3f(uColor, c.x, c.y, c.z);
+            glUniform1i(uChecker, checker ? 1 : 0);
+            m.draw();
         };
-        drawEntity(ground);
-        for (const Block& bl : g_blocks)
-            drawEntity({&g_shapes[bl.shape], {bl.x + 0.5f, bl.y + 0.5f, bl.z + 0.5f}, {1, 1, 1}, bl.color});
-        if (tg.canPlace) // marker for the cell where the next block will be placed
-            drawEntity({&sphere, {tg.px + 0.5f, tg.py + 0.5f, tg.pz + 0.5f}, {0.12f, 0.12f, 0.12f}, PALETTE[g_colorIdx]});
 
+        drawMesh(plane, Mat4::identity(), Vec3(1, 1, 1), true);
+        for (int i = 0; i < (int)g_objects.size(); i++) {
+            const Object& o = g_objects[i];
+            Vec3 c = i == g_selected ? o.color * 0.65f + Vec3(0.35f, 0.35f, 0.35f) : o.color; // highlight selection
+            drawMesh(g_shapes[o.shape], translate(o.pos) * o.rot * scale(o.scale), c, false);
+        }
+        if (hasCell) // marker for the cell where the next object will be placed
+            drawMesh(sphere, translate(cell) * scale(Vec3(0.12f, 0.12f, 0.12f)), g_color, false);
+
+        if (g_selected >= 0 && g_mode != MODE_BUILD && g_mode != MODE_FREECAM) {
+            const Object& o = g_objects[g_selected];
+            float k = gizmoK();
+            glDisable(GL_DEPTH_TEST); // handles are always visible, even inside the object
+            for (int a = 0; a < GIZMO_AXES; a++) {
+                Mat4 axisRot = Mat4::identity(); // turns local +Y into the chosen axis
+                if (a == 0) axisRot = rotateZ(radians(-90.0f));
+                if (a == 2) axisRot = rotateX(radians(90.0f));
+                if (g_mode == MODE_ROTATE) {
+                    float r = ringRadius(o, k);
+                    drawMesh(torus, translate(o.pos) * axisRot * scale(Vec3(r, r, r)), AXIS_COLOR[a], false);
+                } else {
+                    float len = gizmoLen(o, a, k), shaft = len - 0.3f * k;
+                    Mat4 base = translate(o.pos) * gizmoFrame(o) * axisRot;
+                    drawMesh(g_shapes[1], base * translate(Vec3(0, shaft * 0.5f, 0)) * scale(Vec3(0.05f * k, shaft, 0.05f * k)), AXIS_COLOR[a], false);
+                    drawMesh(cone, base * translate(Vec3(0, len - 0.15f * k, 0)) * scale(Vec3(0.2f * k, 0.3f * k, 0.2f * k)), AXIS_COLOR[a], false);
+                }
+            }
+            glEnable(GL_DEPTH_TEST);
+        }
+
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
     }
 
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
     sphere.destroy();
     plane.destroy();
+    cone.destroy();
+    torus.destroy();
     for (Mesh& m : g_shapes) m.destroy();
     glDeleteProgram(program);
     glfwDestroyWindow(window);

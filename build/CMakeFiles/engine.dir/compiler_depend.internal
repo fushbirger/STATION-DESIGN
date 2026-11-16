@@ -3,6 +3,10 @@
 
 CMakeFiles/engine.dir/main.cpp.o
  /home/sedonzet/Repositories/STATION-DESIGN/main.cpp
+ /home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/backends/imgui_impl_glfw.h
+ /home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/backends/imgui_impl_opengl3.h
+ /home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/imconfig.h
+ /home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/imgui.h
  /usr/include/GL/gl.h
  /usr/include/GL/glew.h
  /usr/include/GL/glu.h
@@ -14,6 +18,7 @@ CMakeFiles/engine.dir/main.cpp.o
  /usr/include/asm-generic/int-ll64.h
  /usr/include/asm-generic/posix_types.h
  /usr/include/asm-generic/types.h
+ /usr/include/assert.h
  /usr/include/c++/14/algorithm
  /usr/include/c++/14/backward/binders.h
  /usr/include/c++/14/bit
@@ -178,6 +183,8 @@ CMakeFiles/engine.dir/main.cpp.o
  /usr/include/stdint.h
  /usr/include/stdio.h
  /usr/include/stdlib.h
+ /usr/include/string.h
+ /usr/include/strings.h
  /usr/include/time.h
  /usr/include/wchar.h
  /usr/include/wctype.h
@@ -275,6 +282,7 @@ CMakeFiles/engine.dir/main.cpp.o
  /usr/include/x86_64-linux-gnu/sys/select.h
  /usr/include/x86_64-linux-gnu/sys/single_threaded.h
  /usr/include/x86_64-linux-gnu/sys/types.h
+ /usr/lib/gcc/x86_64-linux-gnu/14/include/float.h
  /usr/lib/gcc/x86_64-linux-gnu/14/include/stdarg.h
  /usr/lib/gcc/x86_64-linux-gnu/14/include/stddef.h
  /usr/lib/gcc/x86_64-linux-gnu/14/include/stdint.h
@@ -285,13 +293,13 @@ CMakeFiles/engine.dir/main.cpp.o
  /usr/lib/linux/uapi/x86/asm/types.h
 
 engine
- /lib/i386-linux-gnu/libGLX.so.0
+ /lib/i386-linux-gnu/libGL.so.1
  /lib/i386-linux-gnu/libGLdispatch.so.0
  /lib/i386-linux-gnu/libX11.so.6
  /lib/i386-linux-gnu/libXau.so.6
  /lib/i386-linux-gnu/libXdmcp.so.6
  /lib/i386-linux-gnu/libxcb.so.1
- /lib/x86_64-linux-gnu/libGLX.so.0
+ /lib/x86_64-linux-gnu/libGL.so.1
  /lib/x86_64-linux-gnu/libGLdispatch.so.0
  /lib/x86_64-linux-gnu/libX11.so.6
  /lib/x86_64-linux-gnu/libXau.so.6
@@ -312,15 +320,17 @@ engine
  /usr/lib/gcc/x86_64-linux-gnu/14/libgcc.a
  /usr/lib/gcc/x86_64-linux-gnu/14/libgcc_s.so
  /usr/lib/gcc/x86_64-linux-gnu/14/libstdc++.so
- /usr/lib/i386-linux-gnu/libGLX.so.0
+ /usr/lib/i386-linux-gnu/libGL.so.1
  /usr/lib/i386-linux-gnu/libGLdispatch.so.0
  /usr/lib/i386-linux-gnu/libX11.so.6
  /usr/lib/i386-linux-gnu/libXau.so.6
  /usr/lib/i386-linux-gnu/libXdmcp.so.6
  /usr/lib/i386-linux-gnu/libxcb.so.1
- /usr/lib/x86_64-linux-gnu/libGL.so
  /usr/lib/x86_64-linux-gnu/libGLEW.so
+ /usr/lib/x86_64-linux-gnu/libGLX.so
+ /usr/lib/x86_64-linux-gnu/libOpenGL.so
  /usr/lib/x86_64-linux-gnu/libc_nonshared.a
  /usr/lib/x86_64-linux-gnu/libglfw.so.3.4
  /home/sedonzet/Repositories/STATION-DESIGN/build/CMakeFiles/engine.dir/main.cpp.o
+ /home/sedonzet/Repositories/STATION-DESIGN/build/libimgui.a
 

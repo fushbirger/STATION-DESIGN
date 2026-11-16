@@ -96,8 +96,10 @@ engine_EXTERNAL_OBJECTS =
 engine: CMakeFiles/engine.dir/main.cpp.o
 engine: CMakeFiles/engine.dir/build.make
 engine: CMakeFiles/engine.dir/compiler_depend.ts
-engine: /usr/lib/x86_64-linux-gnu/libGL.so
 engine: /usr/lib/x86_64-linux-gnu/libGLEW.so
+engine: libimgui.a
+engine: /usr/lib/x86_64-linux-gnu/libGLX.so
+engine: /usr/lib/x86_64-linux-gnu/libOpenGL.so
 engine: /usr/lib/x86_64-linux-gnu/libglfw.so.3.4
 engine: CMakeFiles/engine.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/sedonzet/Repositories/STATION-DESIGN/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable engine"

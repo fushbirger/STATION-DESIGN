@@ -3,8 +3,10 @@ engine: \
   /usr/lib/gcc/x86_64-linux-gnu/14/../../../x86_64-linux-gnu/crti.o \
   /usr/lib/gcc/x86_64-linux-gnu/14/crtbeginS.o \
   CMakeFiles/engine.dir/main.cpp.o \
-  /usr/lib/x86_64-linux-gnu/libGL.so \
   /usr/lib/x86_64-linux-gnu/libGLEW.so \
+  libimgui.a \
+  /usr/lib/x86_64-linux-gnu/libGLX.so \
+  /usr/lib/x86_64-linux-gnu/libOpenGL.so \
   /usr/lib/x86_64-linux-gnu/libglfw.so.3.4 \
   /usr/lib/gcc/x86_64-linux-gnu/14/libstdc++.so \
   /usr/lib/gcc/x86_64-linux-gnu/14/../../../x86_64-linux-gnu/libm.so \
@@ -32,16 +34,16 @@ engine: \
   /usr/lib/gcc/x86_64-linux-gnu/14/libgcc.a \
   /usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o \
   /usr/lib/gcc/x86_64-linux-gnu/14/../../../x86_64-linux-gnu/crtn.o \
+  /lib/i386-linux-gnu/libGL.so.1 \
+  /usr/lib/i386-linux-gnu/libGL.so.1 \
+  /lib/x86_64-linux-gnu/libGL.so.1 \
   /lib/i386-linux-gnu/libGLdispatch.so.0 \
   /usr/lib/i386-linux-gnu/libGLdispatch.so.0 \
   /lib/x86_64-linux-gnu/libGLdispatch.so.0 \
-  /lib/i386-linux-gnu/libGLX.so.0 \
-  /usr/lib/i386-linux-gnu/libGLX.so.0 \
-  /lib/x86_64-linux-gnu/libGLX.so.0 \
-  /lib64/ld-linux-x86-64.so.2 \
   /lib/i386-linux-gnu/libX11.so.6 \
   /usr/lib/i386-linux-gnu/libX11.so.6 \
   /lib/x86_64-linux-gnu/libX11.so.6 \
+  /lib64/ld-linux-x86-64.so.2 \
   /lib/i386-linux-gnu/libxcb.so.1 \
   /usr/lib/i386-linux-gnu/libxcb.so.1 \
   /lib/x86_64-linux-gnu/libxcb.so.1 \
@@ -60,9 +62,13 @@ engine: \
 
 CMakeFiles/engine.dir/main.cpp.o:
 
-/usr/lib/x86_64-linux-gnu/libGL.so:
-
 /usr/lib/x86_64-linux-gnu/libGLEW.so:
+
+libimgui.a:
+
+/usr/lib/x86_64-linux-gnu/libGLX.so:
+
+/usr/lib/x86_64-linux-gnu/libOpenGL.so:
 
 /usr/lib/x86_64-linux-gnu/libglfw.so.3.4:
 
@@ -118,25 +124,25 @@ CMakeFiles/engine.dir/main.cpp.o:
 
 /usr/lib/gcc/x86_64-linux-gnu/14/../../../x86_64-linux-gnu/crtn.o:
 
+/lib/i386-linux-gnu/libGL.so.1:
+
+/usr/lib/i386-linux-gnu/libGL.so.1:
+
+/lib/x86_64-linux-gnu/libGL.so.1:
+
 /lib/i386-linux-gnu/libGLdispatch.so.0:
 
 /usr/lib/i386-linux-gnu/libGLdispatch.so.0:
 
 /lib/x86_64-linux-gnu/libGLdispatch.so.0:
 
-/lib/i386-linux-gnu/libGLX.so.0:
-
-/usr/lib/i386-linux-gnu/libGLX.so.0:
-
-/lib/x86_64-linux-gnu/libGLX.so.0:
-
-/lib64/ld-linux-x86-64.so.2:
-
 /lib/i386-linux-gnu/libX11.so.6:
 
 /usr/lib/i386-linux-gnu/libX11.so.6:
 
 /lib/x86_64-linux-gnu/libX11.so.6:
+
+/lib64/ld-linux-x86-64.so.2:
 
 /lib/i386-linux-gnu/libxcb.so.1:
 

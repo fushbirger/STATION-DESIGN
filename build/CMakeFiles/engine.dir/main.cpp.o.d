@@ -24,8 +24,17 @@ CMakeFiles/engine.dir/main.cpp.o: \
  /usr/include/x86_64-linux-gnu/bits/stdint-intn.h \
  /usr/include/x86_64-linux-gnu/bits/stdint-uintn.h \
  /usr/include/x86_64-linux-gnu/bits/stdint-least.h /usr/include/GL/glu.h \
- /usr/include/GL/gl.h /usr/include/GLFW/glfw3.h /usr/include/c++/14/cmath \
- /usr/include/c++/14/bits/requires_hosted.h \
+ /usr/include/GL/gl.h /usr/include/GLFW/glfw3.h \
+ /home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/imgui.h \
+ /home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/imconfig.h \
+ /usr/lib/gcc/x86_64-linux-gnu/14/include/float.h \
+ /usr/lib/gcc/x86_64-linux-gnu/14/include/stdarg.h /usr/include/string.h \
+ /usr/include/x86_64-linux-gnu/bits/types/locale_t.h \
+ /usr/include/x86_64-linux-gnu/bits/types/__locale_t.h \
+ /usr/include/strings.h /usr/include/assert.h \
+ /home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/backends/imgui_impl_glfw.h \
+ /home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/backends/imgui_impl_opengl3.h \
+ /usr/include/c++/14/cmath /usr/include/c++/14/bits/requires_hosted.h \
  /usr/include/c++/14/bits/cpp_type_traits.h \
  /usr/include/c++/14/ext/type_traits.h /usr/include/math.h \
  /usr/include/x86_64-linux-gnu/bits/math-vector.h \
@@ -43,8 +52,6 @@ CMakeFiles/engine.dir/main.cpp.o: \
  /usr/include/c++/14/bits/std_abs.h /usr/include/stdlib.h \
  /usr/include/x86_64-linux-gnu/bits/waitflags.h \
  /usr/include/x86_64-linux-gnu/bits/waitstatus.h \
- /usr/include/x86_64-linux-gnu/bits/types/locale_t.h \
- /usr/include/x86_64-linux-gnu/bits/types/__locale_t.h \
  /usr/include/x86_64-linux-gnu/sys/types.h \
  /usr/include/x86_64-linux-gnu/bits/types/clock_t.h \
  /usr/include/x86_64-linux-gnu/bits/types/clockid_t.h \
@@ -95,8 +102,7 @@ CMakeFiles/engine.dir/main.cpp.o: \
  /usr/include/c++/14/tr1/poly_hermite.tcc \
  /usr/include/c++/14/tr1/poly_laguerre.tcc \
  /usr/include/c++/14/tr1/riemann_zeta.tcc /usr/include/c++/14/cstdio \
- /usr/include/stdio.h /usr/lib/gcc/x86_64-linux-gnu/14/include/stdarg.h \
- /usr/include/x86_64-linux-gnu/bits/types/__fpos_t.h \
+ /usr/include/stdio.h /usr/include/x86_64-linux-gnu/bits/types/__fpos_t.h \
  /usr/include/x86_64-linux-gnu/bits/types/__mbstate_t.h \
  /usr/include/x86_64-linux-gnu/bits/types/__fpos64_t.h \
  /usr/include/x86_64-linux-gnu/bits/types/__FILE.h \

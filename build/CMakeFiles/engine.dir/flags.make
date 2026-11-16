@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -DASSET_DIR=\"/home/sedonzet/Repositories/STATION-DESIGN/assets\"
 
-CXX_INCLUDES = 
+CXX_INCLUDES = -I/home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src -I/home/sedonzet/Repositories/STATION-DESIGN/build/_deps/imgui-src/backends
 
 CXX_FLAGS = -O3 -DNDEBUG -std=gnu++17
 
