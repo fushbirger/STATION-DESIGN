@@ -180,7 +180,7 @@ struct Mesh {
     }
 };
 
-static Mesh makeSphere(int stacks = 32, int sectors = 64) {
+[[maybe_unused]] static Mesh makeSphere(int stacks = 32, int sectors = 64) {
     std::vector<float> v;
     std::vector<unsigned> idx;
     const float PI = 3.14159265358979f;
@@ -343,6 +343,7 @@ uniform vec3 uColor;
 uniform vec3 uLightPos;
 uniform vec3 uCamPos;
 uniform bool uChecker;
+uniform float uAlpha;
 
 out vec4 FragColor;
 
@@ -362,7 +363,7 @@ void main() {
     float spec = pow(max(dot(N, H), 0.0), 64.0) * (uChecker ? 0.0 : 0.6);
 
     vec3 color = base * (0.15 + diff) + vec3(spec);
-    FragColor = vec4(pow(color, vec3(1.0 / 2.2)), 1.0);
+    FragColor = vec4(pow(color, vec3(1.0 / 2.2)), uAlpha);
 }
 )";
 
@@ -407,20 +408,19 @@ static bool g_firstMouse = true;
 static double g_lastX = 0, g_lastY = 0;
 
 
-//   Scene objects  
+// ---------- Scene objects ----------
 struct Object { int shape; Vec3 pos, scale, color; Mat4 rot = Mat4::identity(); }; // shape = index into g_shapes
 static std::vector<Object> g_objects;
 static int g_selected = -1;                   // index into g_objects, -1 = none
 static std::vector<Mesh> g_shapes;            // 0 = square, 1 = circle, 2+ = loaded models
 static std::vector<std::string> g_shapeNames;
-static int g_shape = 0;                       // shape used when placing
 static const Vec3 PALETTE[] = {{0.85f, 0.85f, 0.85f}, {0.9f, 0.25f, 0.2f}, {0.2f, 0.6f, 0.95f},
                                {0.3f, 0.85f, 0.4f}, {0.95f, 0.8f, 0.2f}, {0.6f, 0.4f, 0.25f}};
 static const int PALETTE_N = 6;
 static int g_colorIdx = 0;
 static Vec3 g_color = PALETTE[0];             // color used when placing
 
-enum Mode { MODE_BUILD, MODE_MOVE, MODE_SIZE, MODE_ROTATE, MODE_FREECAM };
+enum Mode { MODE_BUILD, MODE_REMOVE, MODE_MOVE, MODE_SIZE, MODE_ROTATE, MODE_FREECAM };
 static Mode g_mode = MODE_BUILD, g_lastTool = MODE_BUILD;
 static bool g_lmbPressed = false;             // left click this frame (not over the UI)
 static bool g_rmbLook = false;                // right mouse held: look around
@@ -430,8 +430,26 @@ static const float GRID_SNAP = 0.25f;         // move / size step
 static const float MIN_SCALE = 0.25f;
 static const float ROT_SNAP = 3.14159265f / 12.0f; // 15 degrees
 
+// Hotbar: one slot = a ready-made piece (shape + size + color)
+struct Item { std::string name; int shape; Vec3 scale, color; };
+static const char* CAT_NAMES[5] = {"WALLS", "FLOOR", "ROOF", "RAILS", "EXTRAS"};
+static std::vector<Item> g_items[5];
+static int g_cat = 0, g_item = 0;              // selected category / slot
 
-//   Model loading (Wavefront .obj)  
+// Stations: each one is a rectangular lot on the map with its own objects
+struct Station { std::string name; float x0, z0, x1, z1; Vec3 color; std::vector<Object> objects; };
+static std::vector<Station> g_stations;
+static int g_cur = -1;                         // station being built, -1 = none
+enum Scene { SCENE_MAP, SCENE_BUILDER };
+static Scene g_scene = SCENE_MAP;
+static float g_mapX = 0, g_mapZ = 0, g_mapH = 60; // map camera (looks straight down)
+static bool g_areaDrag = false;                // dragging out a new lot on the map
+static int g_ax0 = 0, g_az0 = 0, g_ax1 = 0, g_az1 = 0;
+static std::string g_msg;                      // message shown in the map window
+static int g_hover = -1;                       // object under the cursor ("shine")
+
+
+// ---------- Model loading (Wavefront .obj) ----------
 #ifndef ASSET_DIR
 #define ASSET_DIR "assets"
 #endif
@@ -544,7 +562,7 @@ static void loadModels() {
     }
 }
 
-//   Picking  
+// ---------- Picking ----------
 struct Ray { Vec3 o, d; };
 
 // Ray from the camera through the mouse cursor
@@ -608,17 +626,37 @@ static Hit raycastScene(const Ray& ray) {
     return best;
 }
 
-// Grid cell (as a center point) next to the face that was hit. False if outside the floor.
-static bool hitCell(const Hit& h, const Ray& ray, Vec3& center) {
-    if (!h.hit) return false;
-    Vec3 p = ray.o + ray.d * h.t + h.normal * 0.01f;
-    int cx = (int)std::floor(p.x), cy = (int)std::floor(p.y), cz = (int)std::floor(p.z);
-    if (cx < -50 || cx >= 50 || cz < -50 || cz >= 50 || cy < 0) return false;
-    center = Vec3(cx + 0.5f, cy + 0.5f, cz + 0.5f);
-    return true;
+// Where a new piece goes: on top of the face that was hit, or beside it, snapped to a 0.5 grid.
+// False if the spot is outside the current station lot.
+static bool placement(const Hit& h, const Ray& ray, const Item& it, Vec3& center) {
+    if (!h.hit || g_cur < 0) return false;
+    Vec3 p = ray.o + ray.d * h.t, half = it.scale * 0.5f, n = h.normal;
+    auto sn = [](float v) { return std::round(v * 2.0f) / 2.0f; };
+    if (n.y > 0.5f) {
+        center = Vec3(sn(p.x), p.y + half.y, sn(p.z));
+    } else if (n.y < -0.5f) {
+        center = Vec3(sn(p.x), p.y - half.y, sn(p.z));
+    } else { // side of an object: put the piece next to it, bottoms aligned
+        const Object& o = g_objects[h.object];
+        center = p + Vec3(n.x * half.x, 0, n.z * half.z);
+        if (std::fabs(n.x) < 0.5f) center.x = sn(p.x);
+        if (std::fabs(n.z) < 0.5f) center.z = sn(p.z);
+        center.y = o.pos.y - o.scale.y * 0.5f + half.y;
+    }
+    const Station& st = g_stations[g_cur];
+    return center.x >= st.x0 && center.x <= st.x1 && center.z >= st.z0 && center.z <= st.z1;
 }
 
-//   Gizmo (arrows for Move / Size, rings for Rotate)  
+// Floor cell under the mouse (map mode)
+static bool groundCell(const Ray& ray, int& cx, int& cz) {
+    if (ray.d.y > -1e-6f) return false;
+    Vec3 p = ray.o + ray.d * (-ray.o.y / ray.d.y);
+    cx = (int)std::floor(p.x);
+    cz = (int)std::floor(p.z);
+    return cx >= -50 && cx < 50 && cz >= -50 && cz < 50;
+}
+
+// ---------- Gizmo (arrows for Move / Size, rings for Rotate) ----------
 static const Vec3 AXIS_DIR[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
 static const Vec3 AXIS_COLOR[3] = {{0.95f, 0.25f, 0.2f}, {0.3f, 0.85f, 0.4f}, {0.2f, 0.5f, 0.95f}};
 
@@ -732,7 +770,7 @@ static void updateDrag(const Ray& ray) {
     }
 }
 
-//   Mode / selection  
+// ---------- Mode / selection ----------
 static void setMode(GLFWwindow* w, Mode m) {
     if (m != MODE_FREECAM) g_lastTool = m;
     g_mode = m;
@@ -741,19 +779,99 @@ static void setMode(GLFWwindow* w, Mode m) {
     g_firstMouse = true;
 }
 
-static void deleteSelected() {
-    if (g_selected < 0 || g_selected >= (int)g_objects.size()) return;
-    g_objects.erase(g_objects.begin() + g_selected);
-    g_selected = -1;
+static void deleteObject(int i) {
+    if (i < 0 || i >= (int)g_objects.size()) return;
+    g_objects.erase(g_objects.begin() + i);
+    if (g_selected == i) g_selected = -1;
+    else if (g_selected > i) g_selected--;
+    g_hover = -1;
     g_drag.active = false;
 }
+static void deleteSelected() { deleteObject(g_selected); }
 
-//   Input callbacks  
+static void selectItem(GLFWwindow* w, int cat, int idx) {
+    g_cat = cat;
+    g_item = idx;
+    g_color = g_items[cat][idx].color;
+    setMode(w, MODE_BUILD); // picking a piece = taking the blueprint in hand
+}
+
+// Hotbar contents. Models loaded from assets/model go into EXTRAS.
+static void buildItems() {
+    auto add = [](int c, const char* n, int sh, Vec3 sc, Vec3 col) { g_items[c].push_back({n, sh, sc, col}); };
+    add(0, "Wall",       0, Vec3(4, 3, 0.3f),      Vec3(0.85f, 0.85f, 0.85f));
+    add(0, "Tall wall",  0, Vec3(4, 5, 0.3f),      Vec3(0.8f, 0.8f, 0.85f));
+    add(0, "Pillar",     1, Vec3(0.6f, 3, 0.6f),   Vec3(0.8f, 0.75f, 0.7f));
+    add(1, "Floor tile", 0, Vec3(2, 0.2f, 2),      Vec3(0.6f, 0.6f, 0.65f));
+    add(1, "Platform",   0, Vec3(6, 0.4f, 3),      Vec3(0.7f, 0.7f, 0.72f));
+    add(1, "Round floor",1, Vec3(3, 0.2f, 3),      Vec3(0.6f, 0.65f, 0.6f));
+    add(2, "Flat roof",  0, Vec3(4, 0.25f, 4),     Vec3(0.55f, 0.3f, 0.3f));
+    add(2, "Wide roof",  0, Vec3(8, 0.25f, 6),     Vec3(0.5f, 0.28f, 0.28f));
+    add(2, "Round roof", 1, Vec3(4, 0.3f, 4),      Vec3(0.5f, 0.35f, 0.3f));
+    add(3, "Track",      0, Vec3(1.5f, 0.12f, 4),  Vec3(0.35f, 0.3f, 0.28f));
+    add(3, "Long track", 0, Vec3(1.5f, 0.12f, 8),  Vec3(0.35f, 0.3f, 0.28f));
+    add(3, "Buffer stop",0, Vec3(1.2f, 0.8f, 0.4f),Vec3(0.9f, 0.25f, 0.2f));
+    add(4, "Block",      0, Vec3(1, 1, 1),         Vec3(0.85f, 0.85f, 0.85f));
+    add(4, "Cylinder",   1, Vec3(1, 1, 1),         Vec3(0.85f, 0.85f, 0.85f));
+    for (int i = 2; i < (int)g_shapes.size(); i++)
+        add(4, g_shapeNames[i].c_str(), i, Vec3(1, 1, 1), Vec3(0.85f, 0.85f, 0.85f));
+    g_color = g_items[0][0].color;
+}
+
+// ---------- Map <-> builder ----------
+static void enterStation(GLFWwindow* w, int i) {
+    g_cur = i;
+    g_objects = std::move(g_stations[i].objects);
+    g_stations[i].objects.clear();
+    g_selected = -1;
+    g_hover = -1;
+    g_msg.clear();
+    g_scene = SCENE_BUILDER;
+    setMode(w, MODE_BUILD);
+    const Station& st = g_stations[i];
+    float cx = (st.x0 + st.x1) * 0.5f, cz = (st.z0 + st.z1) * 0.5f, e = std::max(st.x1 - st.x0, st.z1 - st.z0);
+    g_camera.position = Vec3(cx, 4.0f + e * 0.5f, cz + 6.0f + e * 0.8f);
+    g_camera.yaw = -90.0f;
+    g_camera.pitch = -30.0f;
+}
+
+static void exitToMap(GLFWwindow* w) {
+    if (g_cur >= 0) {
+        Station& st = g_stations[g_cur];
+        st.objects = std::move(g_objects);
+        g_mapX = (st.x0 + st.x1) * 0.5f;
+        g_mapZ = (st.z0 + st.z1) * 0.5f;
+    }
+    g_objects.clear();
+    g_cur = -1;
+    g_selected = -1;
+    g_hover = -1;
+    g_mapH = 40.0f;
+    g_scene = SCENE_MAP;
+    setMode(w, MODE_BUILD);
+}
+
+// Called when the mouse is released after dragging out a lot on the map
+static void finishArea(GLFWwindow* w) {
+    int x0 = std::min(g_ax0, g_ax1), x1 = std::max(g_ax0, g_ax1) + 1;
+    int z0 = std::min(g_az0, g_az1), z1 = std::max(g_az0, g_az1) + 1;
+    if (x1 - x0 < 2 || z1 - z0 < 2) { g_msg = "Area is too small (minimum 2x2 cells)."; return; }
+    for (const Station& st : g_stations)
+        if (x0 < st.x1 && x1 > st.x0 && z0 < st.z1 && z1 > st.z0) { g_msg = "That area overlaps another station."; return; }
+    Station st;
+    st.name = "Station " + std::to_string(g_stations.size() + 1);
+    st.x0 = (float)x0; st.x1 = (float)x1; st.z0 = (float)z0; st.z1 = (float)z1;
+    st.color = PALETTE[g_stations.size() % PALETTE_N];
+    g_stations.push_back(st);
+    enterStation(w, (int)g_stations.size() - 1); // a new area opens the builder
+}
+
+// ---------- Input callbacks ----------
 static void mouseButtonCallback(GLFWwindow* w, int button, int action, int) {
     bool overUI = ImGui::GetIO().WantCaptureMouse;
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS && !overUI) g_lmbPressed = true;
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        if (action == GLFW_PRESS && g_mode != MODE_FREECAM && !overUI) { // hold RMB to look around
+        if (action == GLFW_PRESS && g_scene == SCENE_BUILDER && g_mode != MODE_FREECAM && !overUI) { // hold RMB to turn the camera
             g_rmbLook = true;
             glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             g_firstMouse = true;
@@ -765,12 +883,11 @@ static void mouseButtonCallback(GLFWwindow* w, int button, int action, int) {
 }
 
 static void keyCallback(GLFWwindow* w, int key, int, int action, int) {
-    if (action != GLFW_PRESS || ImGui::GetIO().WantCaptureKeyboard) return;
-    int n = (int)g_shapes.size();
-    if (key == GLFW_KEY_1) g_shape = 0;
-    if (key == GLFW_KEY_2) g_shape = 1;
-    if (key == GLFW_KEY_E) g_shape = (g_shape + 1) % n;     // next shape / model
-    if (key == GLFW_KEY_Q) g_shape = (g_shape + n - 1) % n; // previous shape / model
+    if (action != GLFW_PRESS || ImGui::GetIO().WantCaptureKeyboard || g_scene != SCENE_BUILDER) return;
+    int n = (int)g_items[g_cat].size();
+    if (key >= GLFW_KEY_1 && key <= GLFW_KEY_5) selectItem(w, key - GLFW_KEY_1, 0); // category
+    if (key == GLFW_KEY_E) selectItem(w, g_cat, (g_item + 1) % n);                  // next piece
+    if (key == GLFW_KEY_Q) selectItem(w, g_cat, (g_item + n - 1) % n);             // previous piece
     if (key == GLFW_KEY_C) { g_colorIdx = (g_colorIdx + 1) % PALETTE_N; g_color = PALETTE[g_colorIdx]; }
     if (key == GLFW_KEY_TAB) setMode(w, g_mode == MODE_FREECAM ? g_lastTool : MODE_FREECAM);
     if (key == GLFW_KEY_DELETE) deleteSelected();
@@ -779,13 +896,17 @@ static void keyCallback(GLFWwindow* w, int key, int, int action, int) {
 static void mouseCallback(GLFWwindow*, double x, double y) {
     if (g_firstMouse) { g_lastX = x; g_lastY = y; g_firstMouse = false; }
     bool freeLook = g_mode == MODE_FREECAM && !ImGui::GetIO().WantCaptureMouse; // not while over the UI
-    if (freeLook || g_rmbLook) g_camera.look((float)(x - g_lastX), (float)(y - g_lastY));
+    if (g_scene == SCENE_BUILDER && (freeLook || g_rmbLook)) g_camera.look((float)(x - g_lastX), (float)(y - g_lastY));
     g_lastX = x;
     g_lastY = y;
 }
 
 static void scrollCallback(GLFWwindow*, double, double yoff) {
     if (ImGui::GetIO().WantCaptureMouse) return;
+    if (g_scene == SCENE_MAP) { // zoom the map
+        g_mapH = std::min(120.0f, std::max(8.0f, g_mapH * (1.0f - (float)yoff * 0.1f)));
+        return;
+    }
     g_camera.fov -= (float)yoff * 2.0f;
     if (g_camera.fov < 20.0f) g_camera.fov = 20.0f;
     if (g_camera.fov > 100.0f) g_camera.fov = 100.0f;
@@ -798,6 +919,17 @@ static void processInput(GLFWwindow* w, float dt) {
     float v = g_camera.speed * dt;
     if (glfwGetKey(w, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) v *= 3.0f;
 
+    if (g_scene == SCENE_MAP) { // pan the map
+        v *= g_mapH * 0.15f;
+        if (glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS) g_mapZ -= v;
+        if (glfwGetKey(w, GLFW_KEY_S) == GLFW_PRESS) g_mapZ += v;
+        if (glfwGetKey(w, GLFW_KEY_A) == GLFW_PRESS) g_mapX -= v;
+        if (glfwGetKey(w, GLFW_KEY_D) == GLFW_PRESS) g_mapX += v;
+        g_mapX = std::min(60.0f, std::max(-60.0f, g_mapX));
+        g_mapZ = std::min(60.0f, std::max(-60.0f, g_mapZ));
+        return;
+    }
+
     Vec3 f = g_camera.front();
     Vec3 r = g_camera.right();
     if (glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS) g_camera.position += f * v;
@@ -808,30 +940,171 @@ static void processInput(GLFWwindow* w, float dt) {
     if (glfwGetKey(w, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) g_camera.position -= Vec3(0, 1, 0) * v;
 }
 
-//   UI  
-static void drawUI(GLFWwindow* w) {
+// World point -> screen pixels (for labels)
+static bool projectToScreen(const Vec3& p, const Mat4& view, const Mat4& proj, ImVec2 screen, ImVec2& out) {
+    Mat4 vp = proj * view;
+    float x = vp.m[0] * p.x + vp.m[4] * p.y + vp.m[8] * p.z + vp.m[12];
+    float y = vp.m[1] * p.x + vp.m[5] * p.y + vp.m[9] * p.z + vp.m[13];
+    float cw = vp.m[3] * p.x + vp.m[7] * p.y + vp.m[11] * p.z + vp.m[15];
+    if (cw <= 0.001f) return false;
+    out = ImVec2((x / cw * 0.5f + 0.5f) * screen.x, (1.0f - (y / cw * 0.5f + 0.5f)) * screen.y);
+    return true;
+}
+
+// ---------- UI ----------
+static void drawMapUI(GLFWwindow* w) {
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Tools", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    const char* names[] = {"Build", "Move", "Size", "Rotate", "Free Cam"};
-    for (int i = 0; i < 5; i++) {
+    ImGui::Begin("Station Map", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::TextWrapped("Drag on the ground to mark a new station area.\nClick an existing area to build in it.");
+    ImGui::TextDisabled("WASD: move map   Scroll: zoom");
+    if (!g_msg.empty()) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s", g_msg.c_str());
+    ImGui::SeparatorText("Stations");
+    if (g_stations.empty()) ImGui::TextDisabled("None yet");
+    for (int i = 0; i < (int)g_stations.size(); i++) {
+        const Station& st = g_stations[i];
+        ImGui::PushID(i);
+        ImGui::Text("%s (%dx%d)", st.name.c_str(), (int)(st.x1 - st.x0), (int)(st.z1 - st.z0));
+        ImGui::SameLine();
+        if (ImGui::Button("Build")) enterStation(w, i);
+        ImGui::PopID();
+    }
+    ImGui::End();
+}
+
+// Top bar: big category box + scrollable pieces, other categories below
+static void drawHotbar(GLFWwindow* w) {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(20, 10));
+    ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x - 40, 0));
+    ImGui::Begin("Hotbar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::BeginChild("category", ImVec2(170, 66), ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+    ImGui::SetWindowFontScale(1.6f);
+    ImVec2 ts = ImGui::CalcTextSize(CAT_NAMES[g_cat]);
+    ImGui::SetCursorPos(ImVec2((170 - ts.x) * 0.5f, (66 - ts.y) * 0.5f));
+    ImGui::TextUnformatted(CAT_NAMES[g_cat]);
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("pieces", ImVec2(0, 66), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+    if (ImGui::IsWindowHovered() && io.MouseWheel != 0.0f) ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseWheel * 80.0f);
+    for (int i = 0; i < (int)g_items[g_cat].size(); i++) {
+        const Item& it = g_items[g_cat][i];
+        bool sel = i == g_item;
         if (i > 0) ImGui::SameLine();
-        if (ImGui::RadioButton(names[i], (int)g_mode == i)) setMode(w, (Mode)i);
+        ImGui::PushID(i);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(it.color.x * 0.55f, it.color.y * 0.55f, it.color.z * 0.55f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, sel ? ImVec4(1.0f, 0.85f, 0.3f, 1.0f) : ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, sel ? 2.5f : 0.0f);
+        if (ImGui::Button(it.name.c_str(), ImVec2(110, 40))) selectItem(w, g_cat, i);
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(2);
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    for (int c = 0; c < 5; c++) { // the other categories
+        if (c == g_cat) continue;
+        if (ImGui::SmallButton(CAT_NAMES[c])) selectItem(w, c, 0);
+        ImGui::SameLine();
+        ImGui::TextDisabled("-");
+        ImGui::SameLine();
+    }
+    ImGui::TextDisabled("  * scroll for the next thing");
+    ImGui::End();
+}
+
+// One first-person hand holding a tool. "Shine" (glow) shows which one is active.
+static void drawHandArt(ImDrawList* dl, ImVec2 p, ImVec2 sz, bool left, bool active, bool hover) {
+    auto P = [&](float fx, float fy) { return ImVec2(p.x + fx * sz.x, p.y + fy * sz.y); };
+    auto L = [](ImVec2 a, ImVec2 b, float t) { return ImVec2(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t); };
+    const ImU32 skin = IM_COL32(236, 190, 150, 255), skinDark = IM_COL32(180, 130, 100, 255);
+    const ImU32 sleeve = IM_COL32(60, 70, 95, 255), outline = IM_COL32(35, 30, 30, 255);
+    if (active || hover) {
+        int a = active ? 24 : 10;
+        for (int i = 8; i >= 1; i--) dl->AddCircleFilled(P(0.5f, 0.5f), sz.x * 0.06f * i + 10.0f, IM_COL32(255, 235, 140, a));
+    }
+    if (left) { // spade
+        dl->AddQuadFilled(P(0.30f, 1.0f), P(0.72f, 1.0f), P(0.78f, 0.72f), P(0.38f, 0.66f), sleeve);
+        dl->AddLine(P(0.20f, 0.28f), P(0.66f, 0.80f), IM_COL32(120, 80, 45, 255), sz.x * 0.06f);
+        ImVec2 blade[5] = {P(0.04f, 0.10f), P(0.20f, 0.02f), P(0.34f, 0.14f), P(0.28f, 0.34f), P(0.10f, 0.30f)};
+        dl->AddConvexPolyFilled(blade, 5, IM_COL32(170, 180, 190, 255));
+        dl->AddPolyline(blade, 5, outline, ImDrawFlags_Closed, 2.0f);
+        dl->AddRectFilled(P(0.36f, 0.50f), P(0.80f, 0.80f), skin, 14.0f);
+        for (int i = 1; i <= 3; i++) dl->AddLine(P(0.36f + 0.11f * i, 0.52f), P(0.36f + 0.11f * i, 0.78f), skinDark, 2.0f);
+        dl->AddRect(P(0.36f, 0.50f), P(0.80f, 0.80f), outline, 14.0f, 0, 2.0f);
+    } else { // blueprint
+        ImVec2 paper[4] = {P(0.22f, 0.10f), P(0.80f, 0.04f), P(0.86f, 0.50f), P(0.18f, 0.54f)};
+        dl->AddConvexPolyFilled(paper, 4, IM_COL32(40, 90, 170, 255));
+        for (int i = 1; i <= 3; i++) {
+            float t = i / 4.0f;
+            dl->AddLine(L(paper[0], paper[1], t), L(paper[3], paper[2], t), IM_COL32(255, 255, 255, 90), 1.0f);
+            dl->AddLine(L(paper[0], paper[3], t), L(paper[1], paper[2], t), IM_COL32(255, 255, 255, 90), 1.0f);
+        }
+        dl->AddPolyline(paper, 4, IM_COL32(235, 240, 255, 255), ImDrawFlags_Closed, 2.0f);
+        dl->AddQuadFilled(P(0.28f, 1.0f), P(0.70f, 1.0f), P(0.62f, 0.66f), P(0.22f, 0.72f), sleeve);
+        dl->AddRectFilled(P(0.20f, 0.50f), P(0.64f, 0.80f), skin, 14.0f);
+        for (int i = 1; i <= 3; i++) dl->AddLine(P(0.20f + 0.11f * i, 0.52f), P(0.20f + 0.11f * i, 0.78f), skinDark, 2.0f);
+        dl->AddRect(P(0.20f, 0.50f), P(0.64f, 0.80f), outline, 14.0f, 0, 2.0f);
+    }
+    const char* label = left ? "Spade (remove)" : "Blueprint (build)";
+    dl->AddText(ImVec2(p.x + 9, p.y + sz.y - 19), IM_COL32(0, 0, 0, 200), label);
+    dl->AddText(ImVec2(p.x + 8, p.y + sz.y - 20), IM_COL32(255, 255, 255, 255), label);
+}
+
+static bool handButton(const char* id, ImVec2 pos, ImVec2 size, bool left, bool active) {
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin(id, nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove |
+                                  ImGuiWindowFlags_NoSavedSettings);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton("hand", size);
+    drawHandArt(ImGui::GetWindowDrawList(), p, size, left, active, ImGui::IsItemHovered());
+    ImGui::End();
+    ImGui::PopStyleVar();
+    return clicked;
+}
+
+// Small mouse diagram: left click = use, hold right = turn the camera
+static void drawMouseHint(ImDrawList* dl, ImVec2 p) {
+    const ImU32 line = IM_COL32(235, 235, 235, 230);
+    dl->AddRect(p, ImVec2(p.x + 34, p.y + 54), line, 16.0f, 0, 2.0f);
+    dl->AddLine(ImVec2(p.x + 17, p.y), ImVec2(p.x + 17, p.y + 22), line, 2.0f);
+    dl->AddLine(ImVec2(p.x, p.y + 22), ImVec2(p.x + 34, p.y + 22), line, 2.0f);
+    dl->AddRectFilled(ImVec2(p.x + 3, p.y + 3), ImVec2(p.x + 16, p.y + 21), IM_COL32(255, 235, 140, 140), 8.0f, ImDrawFlags_RoundCornersTopLeft);
+    dl->AddText(ImVec2(p.x - 86, p.y + 8), line, "Click to use");
+    dl->AddText(ImVec2(p.x + 44, p.y + 8), line, "Hold: turn camera");
+}
+
+static void drawBuilderUI(GLFWwindow* w) {
+    ImGuiIO& io = ImGui::GetIO();
+    drawHotbar(w);
+
+    const ImVec2 hand(190, 230);
+    if (handButton("Spade", ImVec2(10, io.DisplaySize.y - hand.y - 8), hand, true, g_mode == MODE_REMOVE)) setMode(w, MODE_REMOVE);
+    if (handButton("Blueprint", ImVec2(io.DisplaySize.x - hand.x - 10, io.DisplaySize.y - hand.y - 8), hand, false, g_mode == MODE_BUILD)) setMode(w, MODE_BUILD);
+    drawMouseHint(ImGui::GetBackgroundDrawList(), ImVec2(io.DisplaySize.x - hand.x - 190, io.DisplaySize.y - 80));
+
+    ImGui::SetNextWindowPos(ImVec2(10, 170), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Tools", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::Text("%s", g_stations[g_cur].name.c_str());
+    if (ImGui::Button("< Back to map")) { exitToMap(w); ImGui::End(); return; }
+    const char* names[] = {"Move", "Size", "Rotate", "Free Cam"};
+    const Mode modes[] = {MODE_MOVE, MODE_SIZE, MODE_ROTATE, MODE_FREECAM};
+    for (int i = 0; i < 4; i++) {
+        if (i > 0) ImGui::SameLine();
+        if (ImGui::RadioButton(names[i], g_mode == modes[i])) setMode(w, modes[i]);
     }
     ImGui::ColorEdit3("Color", &g_color.x);
+    ImGui::TextDisabled("Hands: click one to use it");
+    ImGui::TextDisabled("1-5: category   Q/E: piece");
     ImGui::TextDisabled("WASD/Space/Ctrl: fly   Hold RMB: look");
-    ImGui::TextDisabled("Free Cam: just move the mouse to look");
     ImGui::TextDisabled("Tab: Free Cam on/off   Del: delete");
     ImGui::End();
 
-    ImGui::SetNextWindowPos(ImVec2(10, 130), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(270, 430), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 290, 170), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(270, 330), ImGuiCond_FirstUseEver);
     ImGui::Begin("Objects");
-    ImGui::SeparatorText("Shape to place");
-    for (int i = 0; i < (int)g_shapes.size(); i++) {
-        ImGui::PushID(i);
-        if (ImGui::Selectable(g_shapeNames[i].c_str(), g_shape == i)) g_shape = i;
-        ImGui::PopID();
-    }
     ImGui::SeparatorText("Placed objects");
     ImGui::BeginChild("objlist", ImVec2(0, 140), ImGuiChildFlags_Borders);
     for (int i = 0; i < (int)g_objects.size(); i++) {
@@ -853,6 +1126,11 @@ static void drawUI(GLFWwindow* w) {
         if (ImGui::Button("Delete")) deleteSelected();
     }
     ImGui::End();
+}
+
+static void drawUI(GLFWwindow* w) {
+    if (g_scene == SCENE_MAP) drawMapUI(w);
+    else drawBuilderUI(w);
 }
 
 int main() {
@@ -885,6 +1163,8 @@ int main() {
     }
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -900,8 +1180,8 @@ int main() {
     GLint uLightPos = glGetUniformLocation(program, "uLightPos");
     GLint uCamPos = glGetUniformLocation(program, "uCamPos");
     GLint uChecker = glGetUniformLocation(program, "uChecker");
+    GLint uAlpha = glGetUniformLocation(program, "uAlpha");
 
-    Mesh sphere = makeSphere();
     Mesh plane = makePlane();
     Mesh cone = makeCone();
     Mesh torus = makeTorus();
@@ -910,6 +1190,7 @@ int main() {
     g_shapes.push_back(makeCylinder());
     g_shapeNames.push_back("Circle");
     loadModels();
+    buildItems();
 
     double last = glfwGetTime();
     while (!glfwWindowShouldClose(window)) {
@@ -923,40 +1204,83 @@ int main() {
         ImGui::NewFrame();
         drawUI(window);
         processInput(window, dt);
+        ImGuiIO& io = ImGui::GetIO();
+        bool overUI = io.WantCaptureMouse;
 
-        // Free Cam: the cursor stays visible; mouse movement turns the camera,
-        // and holding the cursor at a window edge keeps turning that way.
-        if (g_mode == MODE_FREECAM && !ImGui::GetIO().WantCaptureMouse) {
-            double mx, my;
-            int ww, wh;
-            glfwGetCursorPos(window, &mx, &my);
-            glfwGetWindowSize(window, &ww, &wh);
-            const double margin = 24.0, edgeSpeed = 700.0; // pixels-equivalent per second
-            float ex = mx < margin ? -1.0f : (mx > ww - margin ? 1.0f : 0.0f);
-            float ey = my < margin ? -1.0f : (my > wh - margin ? 1.0f : 0.0f);
-            g_camera.look(ex * (float)edgeSpeed * dt, ey * (float)edgeSpeed * dt);
+        if (g_scene == SCENE_MAP) { // map camera: straight down
+            g_camera.position = Vec3(g_mapX, g_mapH, g_mapZ);
+            g_camera.yaw = -90.0f;
+            g_camera.pitch = -89.0f;
+            g_camera.fov = 60.0f;
         }
-
-        // ----- World interaction -----
-        bool editing = g_mode != MODE_FREECAM && !g_rmbLook && !ImGui::GetIO().WantCaptureMouse;
         Ray ray = cursorRay(window);
-        Hit hit;
-        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) != GLFW_PRESS) g_drag.active = false;
-        if (g_drag.active && g_selected >= 0) updateDrag(ray);
-        else if (editing && g_mode == MODE_BUILD) hit = raycastScene(ray);
+        bool lmbDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        Vec3 place;
+        bool hasPlace = false;
 
-        Vec3 cell;
-        bool hasCell = editing && g_mode == MODE_BUILD && hitCell(hit, ray, cell);
-        if (g_lmbPressed && editing) {
-            if (g_mode == MODE_BUILD) {
-                if (hasCell) {
-                    g_objects.push_back({g_shape, cell, Vec3(1, 1, 1), g_color});
-                    g_selected = (int)g_objects.size() - 1;
+        if (g_scene == SCENE_MAP) {
+            // ----- Map: drag out a lot, or click an existing one -----
+            int cx, cz;
+            bool onGround = groundCell(ray, cx, cz);
+            if (g_lmbPressed && onGround) {
+                int found = -1;
+                for (int i = 0; i < (int)g_stations.size(); i++) {
+                    const Station& st = g_stations[i];
+                    if (cx >= st.x0 && cx < st.x1 && cz >= st.z0 && cz < st.z1) found = i;
                 }
-            } else {
-                int axis = pickGizmo(ray);
-                if (axis >= 0) beginDrag(ray, axis);
-                else g_selected = raycastScene(ray).object; // click empty space / ground = deselect
+                if (found >= 0) {
+                    enterStation(window, found);
+                } else {
+                    g_areaDrag = true;
+                    g_ax0 = g_ax1 = cx;
+                    g_az0 = g_az1 = cz;
+                    g_msg.clear();
+                }
+            }
+            if (g_areaDrag) {
+                if (onGround) { g_ax1 = cx; g_az1 = cz; }
+                if (!lmbDown) { g_areaDrag = false; finishArea(window); }
+            }
+        } else {
+            // ----- Builder -----
+            // Free Cam: the cursor stays visible; mouse movement turns the camera,
+            // and holding the cursor at a window edge keeps turning that way.
+            if (g_mode == MODE_FREECAM && !overUI) {
+                double mx, my;
+                int ww, wh;
+                glfwGetCursorPos(window, &mx, &my);
+                glfwGetWindowSize(window, &ww, &wh);
+                const double margin = 24.0, edgeSpeed = 700.0;
+                float ex = mx < margin ? -1.0f : (mx > ww - margin ? 1.0f : 0.0f);
+                float ey = my < margin ? -1.0f : (my > wh - margin ? 1.0f : 0.0f);
+                g_camera.look(ex * (float)edgeSpeed * dt, ey * (float)edgeSpeed * dt);
+            }
+
+            bool editing = g_mode != MODE_FREECAM && !g_rmbLook && !overUI;
+            Hit hit;
+            g_hover = -1;
+            if (!lmbDown) g_drag.active = false;
+            if (g_drag.active && g_selected >= 0) updateDrag(ray);
+            else if (editing) {
+                if (g_mode == MODE_BUILD) hit = raycastScene(ray);
+                else g_hover = raycastScene(ray).object; // the object under the cursor shines
+            }
+            const Item& item = g_items[g_cat][g_item];
+            hasPlace = editing && g_mode == MODE_BUILD && placement(hit, ray, item, place);
+
+            if (g_lmbPressed && editing) {
+                if (g_mode == MODE_BUILD) {
+                    if (hasPlace) {
+                        g_objects.push_back({item.shape, place, item.scale, g_color});
+                        g_selected = (int)g_objects.size() - 1;
+                    }
+                } else if (g_mode == MODE_REMOVE) {
+                    deleteObject(g_hover);
+                } else {
+                    int axis = pickGizmo(ray);
+                    if (axis >= 0) beginDrag(ray, axis);
+                    else g_selected = raycastScene(ray).object; // click empty space / ground = deselect
+                }
             }
         }
         g_lmbPressed = false;
@@ -978,23 +1302,45 @@ int main() {
         glUniform3f(uLightPos, 6.0f, 10.0f, 6.0f);
         glUniform3f(uCamPos, g_camera.position.x, g_camera.position.y, g_camera.position.z);
 
-        auto drawMesh = [&](const Mesh& m, const Mat4& model, const Vec3& c, bool checker) {
+        auto drawMesh = [&](const Mesh& m, const Mat4& model, const Vec3& c, bool checker, float alpha = 1.0f) {
             glUniformMatrix4fv(uModel, 1, GL_FALSE, model.m);
             glUniform3f(uColor, c.x, c.y, c.z);
             glUniform1i(uChecker, checker ? 1 : 0);
+            glUniform1f(uAlpha, alpha);
             m.draw();
+        };
+        auto drawObject = [&](const Object& o, const Vec3& c) {
+            drawMesh(g_shapes[o.shape], translate(o.pos) * o.rot * scale(o.scale), c, false);
+        };
+        auto drawLot = [&](float x0, float z0, float x1, float z1, const Vec3& c, float alpha) { // flat marker on the floor
+            drawMesh(g_shapes[0], translate(Vec3((x0 + x1) * 0.5f, 0.03f, (z0 + z1) * 0.5f)) * scale(Vec3(x1 - x0, 0.04f, z1 - z0)), c, false, alpha);
         };
 
         drawMesh(plane, Mat4::identity(), Vec3(1, 1, 1), true);
+        for (const Station& st : g_stations)
+            for (const Object& o : st.objects) drawObject(o, o.color);
         for (int i = 0; i < (int)g_objects.size(); i++) {
             const Object& o = g_objects[i];
-            Vec3 c = i == g_selected ? o.color * 0.65f + Vec3(0.35f, 0.35f, 0.35f) : o.color; // highlight selection
-            drawMesh(g_shapes[o.shape], translate(o.pos) * o.rot * scale(o.scale), c, false);
+            Vec3 c = o.color;
+            if (i == g_selected) c = c * 0.65f + Vec3(0.35f, 0.35f, 0.35f);       // selected
+            else if (i == g_hover) c = c * 0.5f + Vec3(0.5f, 0.42f, 0.1f);        // shine: this is the one you would click
+            drawObject(o, c);
         }
-        if (hasCell) // marker for the cell where the next object will be placed
-            drawMesh(sphere, translate(cell) * scale(Vec3(0.12f, 0.12f, 0.12f)), g_color, false);
+        for (int i = 0; i < (int)g_stations.size(); i++) {
+            const Station& st = g_stations[i];
+            drawLot(st.x0, st.z0, st.x1, st.z1, st.color, i == g_cur ? 0.35f : 0.6f);
+        }
+        if (g_areaDrag) {
+            float x0 = (float)std::min(g_ax0, g_ax1), x1 = (float)std::max(g_ax0, g_ax1) + 1;
+            float z0 = (float)std::min(g_az0, g_az1), z1 = (float)std::max(g_az0, g_az1) + 1;
+            drawLot(x0, z0, x1, z1, Vec3(0.3f, 0.9f, 0.4f), 0.55f);
+        }
+        if (hasPlace) { // see-through preview of the piece about to be placed
+            const Item& item = g_items[g_cat][g_item];
+            drawMesh(g_shapes[item.shape], translate(place) * scale(item.scale), g_color, false, 0.5f);
+        }
 
-        if (g_selected >= 0 && g_mode != MODE_BUILD && g_mode != MODE_FREECAM) {
+        if (g_scene == SCENE_BUILDER && g_selected >= 0 && (g_mode == MODE_MOVE || g_mode == MODE_SIZE || g_mode == MODE_ROTATE)) {
             const Object& o = g_objects[g_selected];
             float k = gizmoK();
             glDisable(GL_DEPTH_TEST); // handles are always visible, even inside the object
@@ -1015,6 +1361,16 @@ int main() {
             glEnable(GL_DEPTH_TEST);
         }
 
+        if (g_scene == SCENE_MAP) { // station names on the map
+            for (const Station& st : g_stations) {
+                ImVec2 sp;
+                if (!projectToScreen(Vec3((st.x0 + st.x1) * 0.5f, 0.1f, (st.z0 + st.z1) * 0.5f), view, proj, io.DisplaySize, sp)) continue;
+                ImVec2 ts = ImGui::CalcTextSize(st.name.c_str());
+                ImGui::GetBackgroundDrawList()->AddText(ImVec2(sp.x - ts.x * 0.5f + 1, sp.y - ts.y * 0.5f + 1), IM_COL32(0, 0, 0, 220), st.name.c_str());
+                ImGui::GetBackgroundDrawList()->AddText(ImVec2(sp.x - ts.x * 0.5f, sp.y - ts.y * 0.5f), IM_COL32(255, 255, 255, 255), st.name.c_str());
+            }
+        }
+
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
@@ -1023,7 +1379,6 @@ int main() {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
-    sphere.destroy();
     plane.destroy();
     cone.destroy();
     torus.destroy();
