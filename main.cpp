@@ -440,13 +440,34 @@ static int g_cat = 0, g_item = 0;              // selected category / slot
 struct Station { std::string name; float x0, z0, x1, z1; Vec3 color; std::vector<Object> objects; };
 static std::vector<Station> g_stations;
 static int g_cur = -1;                         // station being built, -1 = none
-enum Scene { SCENE_MAP, SCENE_BUILDER };
-static Scene g_scene = SCENE_MAP;
+enum Scene { SCENE_MENU, SCENE_MAP, SCENE_BUILDER };
+static Scene g_scene = SCENE_MENU;
 static float g_mapX = 0, g_mapZ = 0, g_mapH = 60; // map camera (looks straight down)
 static bool g_areaDrag = false;                // dragging out a new lot on the map
 static int g_ax0 = 0, g_az0 = 0, g_ax1 = 0, g_az1 = 0;
 static std::string g_msg;                      // message shown in the map window
 static int g_hover = -1;                       // object under the cursor ("shine")
+
+// First person camera: walk on the ground or fly freely
+enum CamMove { CAM_WALK, CAM_FLY };
+static CamMove g_camMove = CAM_WALK;
+static float g_velY = 0;
+static bool g_onGround = false;
+static const float EYE_HEIGHT = 1.7f, GRAVITY = 20.0f, JUMP_SPEED = 7.0f;
+static const float STEP_H = 0.5f, BODY_R = 0.3f, WALK_SPEED = 4.0f;
+
+// Dragging out new stations is disabled for now: only 1 station
+static const bool ALLOW_NEW_STATIONS = false;
+static int g_mapSel = -1, g_hoverStation = -1;
+
+struct Lot { const char* name; float x0, z0, x1, z1; };
+static const Lot LOCKED_LOTS[] = {{"Station 2 (locked)", 22, -14, 38, -2},
+                                  {"Station 3 (locked)", -38, 10, -22, 22}};
+static bool lockedAt(int cx, int cz) {
+    for (const Lot& l : LOCKED_LOTS)
+        if (cx >= l.x0 && cx < l.x1 && cz >= l.z0 && cz < l.z1) return true;
+    return false;
+}
 
 
 // ---------- Model loading (Wavefront .obj) ----------
@@ -770,6 +791,34 @@ static void updateDrag(const Ray& ray) {
     }
 }
 
+// ---------- Ground walk helpers ----------
+// Floor height under the feet: ground (0) or the top of an object that is low enough to step onto
+static float floorHeightAt(const Vec3& feet) {
+    float best = 0;
+    for (const Object& o : g_objects) {
+        Vec3 l = mulDirT(o.rot, feet - o.pos), h = o.scale * 0.5f;
+        if (std::fabs(l.x) > h.x || std::fabs(l.z) > h.z) continue;
+        float top = o.pos.y + h.y;
+        if (top <= feet.y + STEP_H && top > best) best = top;
+    }
+    return best;
+}
+// Walls / tall objects that block the body
+static bool blockedAt(const Vec3& feet) {
+    for (const Object& o : g_objects) {
+        Vec3 l = mulDirT(o.rot, feet - o.pos), h = o.scale * 0.5f;
+        if (std::fabs(l.x) > h.x + BODY_R || std::fabs(l.z) > h.z + BODY_R) continue;
+        float top = o.pos.y + h.y, bot = o.pos.y - h.y;
+        if (top > feet.y + STEP_H && bot < feet.y + EYE_HEIGHT) return true;
+    }
+    return false;
+}
+static void setCamMove(CamMove m) {
+    g_camMove = m;
+    g_velY = 0;
+    g_onGround = false;
+}
+
 // ---------- Mode / selection ----------
 static void setMode(GLFWwindow* w, Mode m) {
     if (m != MODE_FREECAM) g_lastTool = m;
@@ -830,9 +879,15 @@ static void enterStation(GLFWwindow* w, int i) {
     setMode(w, MODE_BUILD);
     const Station& st = g_stations[i];
     float cx = (st.x0 + st.x1) * 0.5f, cz = (st.z0 + st.z1) * 0.5f, e = std::max(st.x1 - st.x0, st.z1 - st.z0);
-    g_camera.position = Vec3(cx, 4.0f + e * 0.5f, cz + 6.0f + e * 0.8f);
+    g_velY = 0; g_onGround = false;
+    if (g_camMove == CAM_WALK) {
+        g_camera.position = Vec3(cx, EYE_HEIGHT, st.z1 - 1.0f);
+        g_camera.pitch = -10.0f;
+    } else {
+        g_camera.position = Vec3(cx, 4.0f + e * 0.5f, cz + 6.0f + e * 0.8f);
+        g_camera.pitch = -30.0f;
+    }
     g_camera.yaw = -90.0f;
-    g_camera.pitch = -30.0f;
 }
 
 static void exitToMap(GLFWwindow* w) {
@@ -841,6 +896,7 @@ static void exitToMap(GLFWwindow* w) {
         st.objects = std::move(g_objects);
         g_mapX = (st.x0 + st.x1) * 0.5f;
         g_mapZ = (st.z0 + st.z1) * 0.5f;
+        g_mapSel = g_cur;
     }
     g_objects.clear();
     g_cur = -1;
@@ -883,12 +939,20 @@ static void mouseButtonCallback(GLFWwindow* w, int button, int action, int) {
 }
 
 static void keyCallback(GLFWwindow* w, int key, int, int action, int) {
-    if (action != GLFW_PRESS || ImGui::GetIO().WantCaptureKeyboard || g_scene != SCENE_BUILDER) return;
+    if (action != GLFW_PRESS || ImGui::GetIO().WantCaptureKeyboard) return;
+    if (key == GLFW_KEY_ESCAPE) { // builder -> map -> menu -> quit
+        if (g_scene == SCENE_BUILDER) exitToMap(w);
+        else if (g_scene == SCENE_MAP) g_scene = SCENE_MENU;
+        else glfwSetWindowShouldClose(w, 1);
+        return;
+    }
+    if (g_scene != SCENE_BUILDER) return;
     int n = (int)g_items[g_cat].size();
     if (key >= GLFW_KEY_1 && key <= GLFW_KEY_5) selectItem(w, key - GLFW_KEY_1, 0); // category
     if (key == GLFW_KEY_E) selectItem(w, g_cat, (g_item + 1) % n);                  // next piece
     if (key == GLFW_KEY_Q) selectItem(w, g_cat, (g_item + n - 1) % n);             // previous piece
     if (key == GLFW_KEY_C) { g_colorIdx = (g_colorIdx + 1) % PALETTE_N; g_color = PALETTE[g_colorIdx]; }
+    if (key == GLFW_KEY_F) setCamMove(g_camMove == CAM_WALK ? CAM_FLY : CAM_WALK); // Ground walk <-> Free cam
     if (key == GLFW_KEY_TAB) setMode(w, g_mode == MODE_FREECAM ? g_lastTool : MODE_FREECAM);
     if (key == GLFW_KEY_DELETE) deleteSelected();
 }
@@ -903,6 +967,7 @@ static void mouseCallback(GLFWwindow*, double x, double y) {
 
 static void scrollCallback(GLFWwindow*, double, double yoff) {
     if (ImGui::GetIO().WantCaptureMouse) return;
+    if (g_scene == SCENE_MENU) return;
     if (g_scene == SCENE_MAP) { // zoom the map
         g_mapH = std::min(120.0f, std::max(8.0f, g_mapH * (1.0f - (float)yoff * 0.1f)));
         return;
@@ -913,8 +978,8 @@ static void scrollCallback(GLFWwindow*, double, double yoff) {
 }
 
 static void processInput(GLFWwindow* w, float dt) {
-    if (glfwGetKey(w, GLFW_KEY_ESCAPE) == GLFW_PRESS) glfwSetWindowShouldClose(w, 1);
     if (ImGui::GetIO().WantTextInput) return; // typing into a UI field
+    if (g_scene == SCENE_MENU) return;
 
     float v = g_camera.speed * dt;
     if (glfwGetKey(w, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) v *= 3.0f;
@@ -930,14 +995,42 @@ static void processInput(GLFWwindow* w, float dt) {
         return;
     }
 
-    Vec3 f = g_camera.front();
-    Vec3 r = g_camera.right();
-    if (glfwGetKey(w, GLFW_KEY_W) == GLFW_PRESS) g_camera.position += f * v;
-    if (glfwGetKey(w, GLFW_KEY_S) == GLFW_PRESS) g_camera.position -= f * v;
-    if (glfwGetKey(w, GLFW_KEY_D) == GLFW_PRESS) g_camera.position += r * v;
-    if (glfwGetKey(w, GLFW_KEY_A) == GLFW_PRESS) g_camera.position -= r * v;
-    if (glfwGetKey(w, GLFW_KEY_SPACE) == GLFW_PRESS) g_camera.position += Vec3(0, 1, 0) * v;
-    if (glfwGetKey(w, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) g_camera.position -= Vec3(0, 1, 0) * v;
+    auto down = [&](int k) { return glfwGetKey(w, k) == GLFW_PRESS; };
+    if (g_camMove == CAM_FLY) { // Free cam
+        Vec3 f = g_camera.front(), r = g_camera.right();
+        if (down(GLFW_KEY_W)) g_camera.position += f * v;
+        if (down(GLFW_KEY_S)) g_camera.position -= f * v;
+        if (down(GLFW_KEY_D)) g_camera.position += r * v;
+        if (down(GLFW_KEY_A)) g_camera.position -= r * v;
+        if (down(GLFW_KEY_SPACE)) g_camera.position += Vec3(0, 1, 0) * v;
+        if (down(GLFW_KEY_LEFT_CONTROL)) g_camera.position -= Vec3(0, 1, 0) * v;
+        return;
+    }
+
+    // Ground walk: walk on the ground, gravity, jump, small steps, collision with objects
+    Vec3 f = g_camera.front(); f.y = 0; f = normalize(f);
+    Vec3 r = g_camera.right(); r.y = 0; r = normalize(r);
+    Vec3 mv;
+    if (down(GLFW_KEY_W)) mv += f;
+    if (down(GLFW_KEY_S)) mv -= f;
+    if (down(GLFW_KEY_D)) mv += r;
+    if (down(GLFW_KEY_A)) mv -= r;
+    if (dot(mv, mv) > 0) mv = normalize(mv) * (WALK_SPEED * (down(GLFW_KEY_LEFT_SHIFT) ? 1.8f : 1.0f) * dt);
+
+    Vec3 feet = g_camera.position - Vec3(0, EYE_HEIGHT, 0);
+    Vec3 tx = feet + Vec3(mv.x, 0, 0);
+    if (!blockedAt(tx) || blockedAt(feet)) feet = tx;
+    Vec3 tz = feet + Vec3(0, 0, mv.z);
+    if (!blockedAt(tz) || blockedAt(feet)) feet = tz;
+
+    if (g_onGround && down(GLFW_KEY_SPACE)) { g_velY = JUMP_SPEED; g_onGround = false; }
+    g_velY -= GRAVITY * dt;
+    feet.y += g_velY * dt;
+    float fl = floorHeightAt(feet);
+    if (feet.y <= fl) { feet.y = fl; g_velY = 0; g_onGround = true; }
+    else g_onGround = false;
+
+    g_camera.position = feet + Vec3(0, EYE_HEIGHT, 0);
 }
 
 // World point -> screen pixels (for labels)
@@ -952,23 +1045,59 @@ static bool projectToScreen(const Vec3& p, const Mat4& view, const Mat4& proj, I
 }
 
 // ---------- UI ----------
+static void drawMenuUI(GLFWwindow* w) {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(380, 0));
+    ImGui::Begin("Main Menu", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(2.2f);
+    ImVec2 ts = ImGui::CalcTextSize("Station Design");
+    ImGui::SetCursorPosX((380 - ts.x) * 0.5f);
+    ImGui::TextUnformatted("Station Design");
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Spacing();
+    if (ImGui::Button("Start", ImVec2(-1, 44))) {
+        g_scene = SCENE_MAP;
+        g_mapX = g_mapZ = 0; g_mapH = 40.0f; g_mapSel = -1; g_msg.clear();
+        setMode(w, MODE_BUILD);
+    }
+    if (ImGui::CollapsingHeader("Controls")) {
+        ImGui::TextWrapped("Map: click a station, then Build. WASD move, scroll zoom.");
+        ImGui::TextWrapped("Builder: 1-5 category, Q/E piece, C color, F Ground walk / Free cam, Hold RMB look, Del delete.");
+        ImGui::TextWrapped("Ground walk: WASD walk, Shift run, Space jump.  Free cam: WASD fly, Space up, Ctrl down.");
+        ImGui::TextWrapped("Esc: back (builder > map > menu > quit).");
+    }
+    if (ImGui::Button("Quit", ImVec2(-1, 34))) glfwSetWindowShouldClose(w, 1);
+    ImGui::End();
+}
+
 static void drawMapUI(GLFWwindow* w) {
+    ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
     ImGui::Begin("Station Map", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::TextWrapped("Drag on the ground to mark a new station area.\nClick an existing area to build in it.");
-    ImGui::TextDisabled("WASD: move map   Scroll: zoom");
+    ImGui::TextWrapped("Click a station on the map (or in the list) to select it, then press Build.");
+    ImGui::TextDisabled("WASD: move map   Scroll: zoom   Esc: main menu");
     if (!g_msg.empty()) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s", g_msg.c_str());
     ImGui::SeparatorText("Stations");
-    if (g_stations.empty()) ImGui::TextDisabled("None yet");
     for (int i = 0; i < (int)g_stations.size(); i++) {
-        const Station& st = g_stations[i];
         ImGui::PushID(i);
-        ImGui::Text("%s (%dx%d)", st.name.c_str(), (int)(st.x1 - st.x0), (int)(st.z1 - st.z0));
-        ImGui::SameLine();
-        if (ImGui::Button("Build")) enterStation(w, i);
+        if (ImGui::Selectable(g_stations[i].name.c_str(), g_mapSel == i)) { g_mapSel = i; g_msg.clear(); }
         ImGui::PopID();
     }
+    ImGui::BeginDisabled();
+    for (const Lot& l : LOCKED_LOTS) ImGui::Selectable(l.name, false);
+    ImGui::EndDisabled();
     ImGui::End();
+
+    if (g_mapSel >= 0 && g_mapSel < (int)g_stations.size()) { // detail card
+        const Station& st = g_stations[g_mapSel];
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 20), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::Begin("Selected station", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::Text("%s", st.name.c_str());
+        ImGui::TextDisabled("Size %dx%d   Pieces: %d", (int)(st.x1 - st.x0), (int)(st.z1 - st.z0), (int)st.objects.size());
+        if (ImGui::Button("Build here", ImVec2(220, 40))) enterStation(w, g_mapSel);
+        ImGui::End();
+    }
 }
 
 // Top bar: big category box + scrollable pieces, other categories below
@@ -1080,6 +1209,12 @@ static void drawBuilderUI(GLFWwindow* w) {
     ImGuiIO& io = ImGui::GetIO();
     drawHotbar(w);
 
+    // Camera mode badge
+    char cm[64];
+    std::snprintf(cm, sizeof(cm), "%s   [F] switch", g_camMove == CAM_WALK ? "GROUND WALK" : "FREE CAM");
+    ImVec2 cts = ImGui::CalcTextSize(cm);
+    ImGui::GetBackgroundDrawList()->AddText(ImVec2((io.DisplaySize.x - cts.x) * 0.5f, io.DisplaySize.y - 30), IM_COL32(255, 235, 140, 255), cm);
+
     const ImVec2 hand(190, 230);
     if (handButton("Spade", ImVec2(10, io.DisplaySize.y - hand.y - 8), hand, true, g_mode == MODE_REMOVE)) setMode(w, MODE_REMOVE);
     if (handButton("Blueprint", ImVec2(io.DisplaySize.x - hand.x - 10, io.DisplaySize.y - hand.y - 8), hand, false, g_mode == MODE_BUILD)) setMode(w, MODE_BUILD);
@@ -1089,17 +1224,21 @@ static void drawBuilderUI(GLFWwindow* w) {
     ImGui::Begin("Tools", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::Text("%s", g_stations[g_cur].name.c_str());
     if (ImGui::Button("< Back to map")) { exitToMap(w); ImGui::End(); return; }
-    const char* names[] = {"Move", "Size", "Rotate", "Free Cam"};
+    const char* names[] = {"Move", "Size", "Rotate", "Look"};
     const Mode modes[] = {MODE_MOVE, MODE_SIZE, MODE_ROTATE, MODE_FREECAM};
     for (int i = 0; i < 4; i++) {
         if (i > 0) ImGui::SameLine();
         if (ImGui::RadioButton(names[i], g_mode == modes[i])) setMode(w, modes[i]);
     }
+    ImGui::SeparatorText("Camera");
+    if (ImGui::RadioButton("Ground walk", g_camMove == CAM_WALK)) setCamMove(CAM_WALK);
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Free cam", g_camMove == CAM_FLY)) setCamMove(CAM_FLY);
     ImGui::ColorEdit3("Color", &g_color.x);
     ImGui::TextDisabled("Hands: click one to use it");
-    ImGui::TextDisabled("1-5: category   Q/E: piece");
-    ImGui::TextDisabled("WASD/Space/Ctrl: fly   Hold RMB: look");
-    ImGui::TextDisabled("Tab: Free Cam on/off   Del: delete");
+    ImGui::TextDisabled("1-5: category   Q/E: piece   F: walk/fly");
+    ImGui::TextDisabled("WASD move  Space jump/up  Ctrl down (fly)");
+    ImGui::TextDisabled("Hold RMB: look   Tab: Look mode   Del: delete");
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 290, 170), ImGuiCond_FirstUseEver);
@@ -1129,7 +1268,8 @@ static void drawBuilderUI(GLFWwindow* w) {
 }
 
 static void drawUI(GLFWwindow* w) {
-    if (g_scene == SCENE_MAP) drawMapUI(w);
+    if (g_scene == SCENE_MENU) drawMenuUI(w);
+    else if (g_scene == SCENE_MAP) drawMapUI(w);
     else drawBuilderUI(w);
 }
 
@@ -1192,6 +1332,14 @@ int main() {
     loadModels();
     buildItems();
 
+    { // one selectable station for now
+        Station st;
+        st.name = "Central Station";
+        st.x0 = -10; st.x1 = 10; st.z0 = -8; st.z1 = 8;
+        st.color = PALETTE[2];
+        g_stations.push_back(st);
+    }
+
     double last = glfwGetTime();
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
@@ -1207,7 +1355,14 @@ int main() {
         ImGuiIO& io = ImGui::GetIO();
         bool overUI = io.WantCaptureMouse;
 
-        if (g_scene == SCENE_MAP) { // map camera: straight down
+        if (g_scene == SCENE_MENU) { // slowly orbiting camera behind the menu
+            float a = (float)now * 0.15f;
+            Vec3 eye(std::cos(a) * 30.0f, 16.0f, std::sin(a) * 30.0f), d = normalize(Vec3(0, 0, 0) - eye);
+            g_camera.position = eye;
+            g_camera.yaw = std::atan2(d.z, d.x) * 180.0f / 3.14159265f;
+            g_camera.pitch = std::asin(d.y) * 180.0f / 3.14159265f;
+            g_camera.fov = 60.0f;
+        } else if (g_scene == SCENE_MAP) { // map camera: straight down
             g_camera.position = Vec3(g_mapX, g_mapH, g_mapZ);
             g_camera.yaw = -90.0f;
             g_camera.pitch = -89.0f;
@@ -1218,24 +1373,26 @@ int main() {
         Vec3 place;
         bool hasPlace = false;
 
-        if (g_scene == SCENE_MAP) {
-            // ----- Map: drag out a lot, or click an existing one -----
+        if (g_scene == SCENE_MENU) {
+            // nothing: only the menu UI
+        } else if (g_scene == SCENE_MAP) {
+            // ----- Map: select a station (or drag out a lot if enabled) -----
             int cx, cz;
             bool onGround = groundCell(ray, cx, cz);
-            if (g_lmbPressed && onGround) {
-                int found = -1;
+            g_hoverStation = -1;
+            if (onGround && !overUI)
                 for (int i = 0; i < (int)g_stations.size(); i++) {
                     const Station& st = g_stations[i];
-                    if (cx >= st.x0 && cx < st.x1 && cz >= st.z0 && cz < st.z1) found = i;
+                    if (cx >= st.x0 && cx < st.x1 && cz >= st.z0 && cz < st.z1) g_hoverStation = i;
                 }
-                if (found >= 0) {
-                    enterStation(window, found);
-                } else {
+            if (g_lmbPressed && onGround) {
+                if (g_hoverStation >= 0) { g_mapSel = g_hoverStation; g_msg.clear(); }
+                else if (lockedAt(cx, cz)) { g_mapSel = -1; g_msg = "That station is locked for now."; }
+                else if (ALLOW_NEW_STATIONS) {
                     g_areaDrag = true;
-                    g_ax0 = g_ax1 = cx;
-                    g_az0 = g_az1 = cz;
+                    g_ax0 = g_ax1 = cx; g_az0 = g_az1 = cz;
                     g_msg.clear();
-                }
+                } else g_mapSel = -1;
             }
             if (g_areaDrag) {
                 if (onGround) { g_ax1 = cx; g_az1 = cz; }
@@ -1243,7 +1400,7 @@ int main() {
             }
         } else {
             // ----- Builder -----
-            // Free Cam: the cursor stays visible; mouse movement turns the camera,
+            // Look mode: the cursor stays visible; mouse movement turns the camera,
             // and holding the cursor at a window edge keeps turning that way.
             if (g_mode == MODE_FREECAM && !overUI) {
                 double mx, my;
@@ -1315,6 +1472,14 @@ int main() {
         auto drawLot = [&](float x0, float z0, float x1, float z1, const Vec3& c, float alpha) { // flat marker on the floor
             drawMesh(g_shapes[0], translate(Vec3((x0 + x1) * 0.5f, 0.03f, (z0 + z1) * 0.5f)) * scale(Vec3(x1 - x0, 0.04f, z1 - z0)), c, false, alpha);
         };
+        auto drawBorder = [&](float x0, float z0, float x1, float z1, const Vec3& c) {
+            const float t = 0.12f;
+            Vec3 s1(x1 - x0 + t, 0.1f, t), s2(t, 0.1f, z1 - z0 + t);
+            drawMesh(g_shapes[0], translate(Vec3((x0 + x1) * 0.5f, 0.08f, z0)) * scale(s1), c, false);
+            drawMesh(g_shapes[0], translate(Vec3((x0 + x1) * 0.5f, 0.08f, z1)) * scale(s1), c, false);
+            drawMesh(g_shapes[0], translate(Vec3(x0, 0.08f, (z0 + z1) * 0.5f)) * scale(s2), c, false);
+            drawMesh(g_shapes[0], translate(Vec3(x1, 0.08f, (z0 + z1) * 0.5f)) * scale(s2), c, false);
+        };
 
         drawMesh(plane, Mat4::identity(), Vec3(1, 1, 1), true);
         for (const Station& st : g_stations)
@@ -1328,8 +1493,17 @@ int main() {
         }
         for (int i = 0; i < (int)g_stations.size(); i++) {
             const Station& st = g_stations[i];
-            drawLot(st.x0, st.z0, st.x1, st.z1, st.color, i == g_cur ? 0.35f : 0.6f);
+            bool inMap = g_scene != SCENE_BUILDER;
+            bool sel = inMap && i == g_mapSel, hov = inMap && i == g_hoverStation;
+            float a = inMap ? (sel ? 0.85f : (hov ? 0.75f : 0.55f)) : (i == g_cur ? 0.25f : 0.5f);
+            drawLot(st.x0, st.z0, st.x1, st.z1, st.color, a);
+            drawBorder(st.x0, st.z0, st.x1, st.z1, (sel || i == g_cur) ? Vec3(1.0f, 0.9f, 0.3f) : Vec3(0.9f, 0.9f, 0.9f));
         }
+        if (g_scene != SCENE_BUILDER)
+            for (const Lot& l : LOCKED_LOTS) {
+                drawLot(l.x0, l.z0, l.x1, l.z1, Vec3(0.35f, 0.35f, 0.38f), 0.45f);
+                drawBorder(l.x0, l.z0, l.x1, l.z1, Vec3(0.2f, 0.2f, 0.22f));
+            }
         if (g_areaDrag) {
             float x0 = (float)std::min(g_ax0, g_ax1), x1 = (float)std::max(g_ax0, g_ax1) + 1;
             float z0 = (float)std::min(g_az0, g_az1), z1 = (float)std::max(g_az0, g_az1) + 1;
@@ -1362,13 +1536,17 @@ int main() {
         }
 
         if (g_scene == SCENE_MAP) { // station names on the map
-            for (const Station& st : g_stations) {
+            auto label = [&](float x, float z, const char* text, ImU32 col) {
                 ImVec2 sp;
-                if (!projectToScreen(Vec3((st.x0 + st.x1) * 0.5f, 0.1f, (st.z0 + st.z1) * 0.5f), view, proj, io.DisplaySize, sp)) continue;
-                ImVec2 ts = ImGui::CalcTextSize(st.name.c_str());
-                ImGui::GetBackgroundDrawList()->AddText(ImVec2(sp.x - ts.x * 0.5f + 1, sp.y - ts.y * 0.5f + 1), IM_COL32(0, 0, 0, 220), st.name.c_str());
-                ImGui::GetBackgroundDrawList()->AddText(ImVec2(sp.x - ts.x * 0.5f, sp.y - ts.y * 0.5f), IM_COL32(255, 255, 255, 255), st.name.c_str());
-            }
+                if (!projectToScreen(Vec3(x, 0.1f, z), view, proj, io.DisplaySize, sp)) return;
+                ImVec2 ts = ImGui::CalcTextSize(text);
+                ImGui::GetBackgroundDrawList()->AddText(ImVec2(sp.x - ts.x * 0.5f + 1, sp.y - ts.y * 0.5f + 1), IM_COL32(0, 0, 0, 220), text);
+                ImGui::GetBackgroundDrawList()->AddText(ImVec2(sp.x - ts.x * 0.5f, sp.y - ts.y * 0.5f), col, text);
+            };
+            for (const Station& st : g_stations)
+                label((st.x0 + st.x1) * 0.5f, (st.z0 + st.z1) * 0.5f, st.name.c_str(), IM_COL32(255, 255, 255, 255));
+            for (const Lot& l : LOCKED_LOTS)
+                label((l.x0 + l.x1) * 0.5f, (l.z0 + l.z1) * 0.5f, l.name, IM_COL32(170, 170, 175, 255));
         }
 
         ImGui::Render();
