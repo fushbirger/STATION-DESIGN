@@ -456,13 +456,13 @@ static bool g_onGround = false;
 static const float EYE_HEIGHT = 1.7f, GRAVITY = 20.0f, JUMP_SPEED = 7.0f;
 static const float STEP_H = 0.5f, BODY_R = 0.3f, WALK_SPEED = 4.0f;
 
-// Dragging out new stations is disabled for now: only 1 station
+// Dragging out new stations is disabled for now: stations are defined in main()
 static const bool ALLOW_NEW_STATIONS = false;
 static int g_mapSel = -1, g_hoverStation = -1;
 
 struct Lot { const char* name; float x0, z0, x1, z1; };
-static const Lot LOCKED_LOTS[] = {{"Station 2 (locked)", 22, -14, 38, -2},
-                                  {"Station 3 (locked)", -38, 10, -22, 22}};
+// Lots that are still locked (Station 2 is now a real station, see main())
+static const Lot LOCKED_LOTS[] = {{"Station 3 (locked)", -38, 10, -22, 22}};
 static bool lockedAt(int cx, int cz) {
     for (const Lot& l : LOCKED_LOTS)
         if (cx >= l.x0 && cx < l.x1 && cz >= l.z0 && cz < l.z1) return true;
@@ -1273,10 +1273,29 @@ static void drawUI(GLFWwindow* w) {
     else drawBuilderUI(w);
 }
 
+// Registers a station lot on the map. Lots must not overlap each other.
+static void addStation(const char* name, float x0, float z0, float x1, float z1, const Vec3& color) {
+    Station st;
+    st.name = name;
+    st.x0 = x0; st.z0 = z0; st.x1 = x1; st.z1 = z1;
+    st.color = color;
+    g_stations.push_back(st);
+}
+
 int main() {
+    // GLEW (the normal Arch package) only works with X11/GLX. On a Wayland session GLFW 3.4+
+    // would pick Wayland and glewInit() fails, so ask for X11 (XWayland) first.
+#if GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 4)
+    glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
     if (!glfwInit()) {
-        std::fprintf(stderr, "Failed to init GLFW\n");
-        return 1;
+        glfwInitHint(GLFW_PLATFORM, GLFW_ANY_PLATFORM); // no X11 available: fall back to the default
+#else
+    if (!glfwInit()) {
+#endif
+        if (!glfwInit()) {
+            std::fprintf(stderr, "Failed to init GLFW\n");
+            return 1;
+        }
     }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -1297,8 +1316,9 @@ int main() {
     glfwSetKeyCallback(window, keyCallback);
 
     glewExperimental = GL_TRUE;
-    if (glewInit() != GLEW_OK) {
-        std::fprintf(stderr, "Failed to init GLEW\n");
+    GLenum glewErr = glewInit();
+    if (glewErr != GLEW_OK) {
+        std::fprintf(stderr, "Failed to init GLEW: %s\n", (const char*)glewGetErrorString(glewErr));
         return 1;
     }
     glEnable(GL_DEPTH_TEST);
@@ -1332,13 +1352,9 @@ int main() {
     loadModels();
     buildItems();
 
-    { // one selectable station for now
-        Station st;
-        st.name = "Central Station";
-        st.x0 = -10; st.x1 = 10; st.z0 = -8; st.z1 = 8;
-        st.color = PALETTE[2];
-        g_stations.push_back(st);
-    }
+    // Selectable stations (Station 3 is still a locked lot, see LOCKED_LOTS)
+    addStation("Central Station", -10, -8, 10, 8, PALETTE[2]);
+    addStation("Station 2", 22, -14, 38, -2, PALETTE[3]);
 
     double last = glfwGetTime();
     while (!glfwWindowShouldClose(window)) {
